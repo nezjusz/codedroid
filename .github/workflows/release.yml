@@ -1,7 +1,7 @@
 name: Release
 
 # Manual only: the version is typed into the GitHub UI (Actions -> Release -> Run workflow)
-# and becomes both the APK's versionName and the v-tag it is published under.
+# and becomes both the APK's versionName and the tag it is published under.
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +32,12 @@ jobs:
       # The runner image ships the Android SDK with cmdline-tools; no setup action is needed.
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      # Every workflow input is passed through the environment rather than interpolated into
+      # the shell. `${{ }}` inside a `run:` block is script injection: a crafted version string
+      # could otherwise execute arbitrary commands on the runner.
+      REQUESTED_VERSION: ${{ inputs.version }}
+      REQUESTED_NOTES: ${{ inputs.release_notes }}
+      PRERELEASE: ${{ inputs.prerelease }}
 
     steps:
       - name: Checkout
@@ -41,12 +47,12 @@ jobs:
 
       - name: Validate version input
         run: |
-          VERSION='${{ inputs.version }}'
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){0,2}(-[A-Za-z0-9.-]+)?$'; then
-            echo "::error::'$VERSION' is not a valid version. Use 1, 1.2 or 1.0.1 (optional -suffix)."
+          if ! printf '%s' "$REQUESTED_VERSION" \
+               | grep -Eq '^[0-9]+(\.[0-9]+){0,2}(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::'$REQUESTED_VERSION' is not a valid version. Use 1, 1.2 or 1.0.1 (optional -suffix)."
             exit 1
           fi
-          echo "Building v$VERSION"
+          echo "Building v$REQUESTED_VERSION"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -63,7 +69,6 @@ jobs:
           # and the version changes over time, so resolve it rather than hardcoding a path.
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)"
           echo "Using $SDKMANAGER"
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
           yes | "$SDKMANAGER" --licenses > /dev/null
           "$SDKMANAGER" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
 
@@ -92,27 +97,25 @@ jobs:
           CODEDROID_KEYSTORE_PASSWORD: ${{ secrets.CODEDROID_KEYSTORE_PASSWORD }}
           CODEDROID_KEY_ALIAS: ${{ secrets.CODEDROID_KEY_ALIAS }}
           CODEDROID_KEY_PASSWORD: ${{ secrets.CODEDROID_KEY_PASSWORD }}
-        run: |
-          ./gradlew :app:assembleRelease \
-            -PversionName='${{ inputs.version }}' \
-            --stacktrace
+        run: ./gradlew :app:assembleRelease -PversionName="$REQUESTED_VERSION" --stacktrace
 
       - name: Name the APK
         id: apk
         run: |
           SRC=app/build/outputs/apk/release/app-release.apk
           test -f "$SRC" || { echo "::error::release APK was not produced"; exit 1; }
-          cp "$SRC" "codedroid-v${{ inputs.version }}.apk"
-          echo "path=codedroid-v${{ inputs.version }}.apk" >> "$GITHUB_OUTPUT"
-          echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          cp "$SRC" "codedroid-v${REQUESTED_VERSION}.apk"
+          echo "path=codedroid-v${REQUESTED_VERSION}.apk" >> "$GITHUB_OUTPUT"
 
       - name: Verify the built version matches the input
+        env:
+          APK: ${{ steps.apk.outputs.path }}
         run: |
           # Guards against the -P flag silently not reaching Gradle.
-          ACTUAL=$("$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2" dump badging "${{ steps.apk.outputs.path }}" \
+          ACTUAL=$("$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2" dump badging "$APK" \
             | grep -oE "versionName='[^']+'" | head -1 | cut -d"'" -f2)
-          if [ "$ACTUAL" != "${{ inputs.version }}" ]; then
-            echo "::error::built versionName '$ACTUAL' does not match requested '${{ inputs.version }}'"
+          if [ "$ACTUAL" != "$REQUESTED_VERSION" ]; then
+            echo "::error::built versionName '$ACTUAL' does not match requested '$REQUESTED_VERSION'"
             exit 1
           fi
           echo "Verified versionName=$ACTUAL"
@@ -121,24 +124,30 @@ jobs:
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-          NOTES: ${{ inputs.release_notes }}
+          APK: ${{ steps.apk.outputs.path }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
         run: |
-          NOTES="${NOTES:-Release v${{ inputs.version }}"
-          if [ "${{ steps.signing.outputs.signed }}" != "true" ]; then
-            NOTES="$NOTES
+          TAG="v$REQUESTED_VERSION"
+          NOTES_FILE="$RUNNER_TEMP/notes.md"
 
-            ---
-            ⚠️ Signed with the **debug key** (no release keystore configured). Installable, but not publishable to Google Play."
+          printf '%s\n' "${REQUESTED_NOTES:-Release $TAG}" > "$NOTES_FILE"
+          if [ "$SIGNED" != "true" ]; then
+            {
+              echo
+              echo "---"
+              echo "Signed with the **debug key** — no release keystore is configured."
+              echo "This APK is installable but cannot be published to Google Play."
+            } >> "$NOTES_FILE"
           fi
-          if gh release view "v${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "Tag v${{ inputs.version }} already exists; updating the asset instead."
-            gh release upload "v${{ inputs.version }}" "${{ steps.apk.outputs.path }}" --clobber
+
+          ARGS=(--title "CodeDroid $TAG" --notes-file "$NOTES_FILE")
+          [ "$PRERELEASE" = "true" ] && ARGS+=(--prerelease)
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; replacing the asset."
+            gh release upload "$TAG" "$APK" --clobber
           else
-            gh release create "v${{ inputs.version }}" \
-              "${{ steps.apk.outputs.path }}" \
-              --title "CodeDroid v${{ inputs.version }}" \
-              --notes "$NOTES" \
-              ${{ inputs.prerelease && '--prerelease' || '' }}
+            gh release create "$TAG" "$APK" "${ARGS[@]}"
           fi
 
       - name: Upload APK as a workflow artifact
