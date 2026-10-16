@@ -32,7 +32,6 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -171,7 +170,7 @@ private fun InlineBlock(
 ) {
     val status = LocalStatusColors.current
     val codeStyle = remember(status) {
-        MarkdownInline.codeStyle(status.codeBackground, status.codeForeground)
+        MarkdownInline.codeStyle(status.codeBackground, status.codeForeground, fontSize)
     }
     val linkColor = MaterialTheme.colorScheme.primary
     val annotated = remember(node, linkColor, codeStyle) {
@@ -226,16 +225,15 @@ private fun CodeBlock(language: String?, code: String) {
                 modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 2.dp),
             )
         }
-        // Long lines scroll rather than wrapping: wrapped code is harder to read than scrolled code.
+        // Long lines wrap rather than scroll sideways. This app is read on a phone, where a path or a
+        // command that runs off the right edge is simply unreadable until you discover it can be
+        // swiped; wrapping keeps the whole line reachable without a gesture nobody would try.
         Text(
             text = code,
             style = MonoSmallStyle.copy(color = status.codeForeground),
-            softWrap = false,
-            overflow = TextOverflow.Visible,
+            softWrap = true,
             maxLines = 200,
-            modifier = Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
         )
     }
 }
@@ -323,7 +321,7 @@ private fun TableBlockView(
 ) {
     val status = LocalStatusColors.current
     val codeStyle = remember(status) {
-        MarkdownInline.codeStyle(status.codeBackground, status.codeForeground)
+        MarkdownInline.codeStyle(status.codeBackground, status.codeForeground, fontSize)
     }
     val linkColor = MaterialTheme.colorScheme.primary
 
