@@ -6,6 +6,8 @@ without touching your laptop.
 
 Built with Kotlin, Jetpack Compose and **Material 3 Expressive**.
 
+MIT licensed. If you use it and it saves you a trip to the terminal, a star is appreciated.
+
 ---
 
 ## What it does
@@ -14,10 +16,13 @@ Built with Kotlin, Jetpack Compose and **Material 3 Expressive**.
 |---|---|
 | **Hosts** | Pair multiple opencode servers; each keeps its own live connection. |
 | **Live sessions** | Session list with working / needs-approval / idle states, token and cost counters. |
-| **Streaming transcript** | Assistant text, collapsible reasoning, and per-tool-call cards with input and output. |
+| **Streaming transcript** | Assistant text, collapsible reasoning, and tool calls grouped under one disclosure. |
 | **Steer or queue** | Inject a correction into a running turn, or queue a follow-up for when it finishes. |
 | **Approvals** | `once` / `always` / `reject` inline in the chat **and** as a notification with inline actions. |
 | **Interrupts** | Stop a running turn from the phone. |
+| **Auto approval** | Per-session modes: ask everything, auto for reads, or auto-approve all. |
+| **Attachments** | Send files from the phone with per-file upload progress. |
+| **Markdown** | CommonMark with GFM tables, strikethrough and links. |
 | **Background sync** | A foreground service holds the event streams so alerts arrive with the app closed. |
 
 ---
@@ -114,9 +119,13 @@ server traffic rather than to assumptions:
 | `EventDecoderTest` | every event type observed on a live server, plus malformed frames |
 | `TranscriptTest` | replays a real 120-frame turn through the decoder and the merge |
 | `LiveServerTest` | info/projects/sessions/messages decoding, SSE over a real socket, full pairing round trip |
+| `FileUploadTest` | upload → reference → prompt round trip, progress monotonicity, filename safety |
+| `SessionHistorySafetyTest` | a failed fetch must never blank the session list |
+| `NetworkSecurityConfigTest` | cleartext policy, and that no literal-IP `<domain>` entries creep back in |
 
-Fixtures live in `app/src/test/resources/` and were captured from opencode `2.0.28`.
-`docs/opencode-openapi.json` is the spec the models were written against.
+Fixtures live in `app/src/test/resources/` and were captured from opencode `2.0.28`, then
+redacted: the event *shape* is preserved, the prose is not. `docs/opencode-openapi.json` is the
+spec the models were written against.
 
 Three bugs these tests caught, worth keeping in mind if you change the net layer:
 
