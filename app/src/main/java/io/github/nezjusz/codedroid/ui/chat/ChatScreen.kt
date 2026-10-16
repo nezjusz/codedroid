@@ -5,15 +5,20 @@
 
 package io.github.nezjusz.codedroid.ui.chat
 
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,9 +40,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Pause
@@ -49,6 +57,8 @@ import androidx.compose.material.icons.filled.ShieldMoon
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -58,6 +68,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -69,9 +80,11 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -83,6 +96,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.nezjusz.codedroid.core.data.ApprovalMode
+import io.github.nezjusz.codedroid.core.data.ApprovalSetting
 import io.github.nezjusz.codedroid.core.data.Attachment
 import io.github.nezjusz.codedroid.core.data.AttachmentState
 import io.github.nezjusz.codedroid.core.data.Entry
@@ -106,9 +120,13 @@ import io.github.nezjusz.codedroid.ui.components.VerticalGap
 import io.github.nezjusz.codedroid.ui.components.formatTokens
 import io.github.nezjusz.codedroid.ui.markdown.MarkdownText
 import io.github.nezjusz.codedroid.ui.theme.LocalStatusColors
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Most files a single prompt can carry. */
+/** How often the context meter re-reads the newest message while a chat is open. */
+private const val CONTEXT_REFRESH_MS = 30_000L
+
 private const val MAX_ATTACHMENTS = 8
 
 /** Per-file ceiling; bytes are buffered in RAM and base64'd into the prompt. */
@@ -141,7 +159,7 @@ fun ChatScreen(
     var agents by remember { mutableStateOf<List<AgentInfo>>(emptyList()) }
     var agentSheet by remember { mutableStateOf(false) }
     var approvalSheet by remember { mutableStateOf(false) }
-    var approvalMode by remember { mutableStateOf(ApprovalMode.AskEveryTime) }
+    var approval by remember { mutableStateOf(ApprovalSetting.Unknown) }
     var applyingMode by remember { mutableStateOf(false) }
     var replyingTo by remember { mutableStateOf<String?>(null) }
     var sending by remember { mutableStateOf(false) }
@@ -149,12 +167,19 @@ fun ChatScreen(
     var attachments by remember { mutableStateOf<List<Attachment>>(emptyList()) }
 
     val context = LocalContext.current
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+
+    /**
+     * Reads whatever a picker returned and appends it to the draft's attachments.
+     *
+     * Shared by both pickers so the cap, the size limit and the error messages behave identically
+     * whether the bytes came from a photo or from a file.
+     */
+    fun takeUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         val room = MAX_ATTACHMENTS - attachments.size
         if (room <= 0) {
-            scope.launch { snackbars.showSnackbar("Up to $MAX_ATTACHMENTS files per message") }
-            return@rememberLauncherForActivityResult
+            scope.launch { snackbars.showSnackbar("Up to $MAX_ATTACHMENTS attachments per message") }
+            return
         }
         val picked = uris.take(room).mapNotNull { readAttachment(context, it, MAX_ATTACHMENT_BYTES) }
         if (picked.isEmpty()) {
@@ -163,14 +188,44 @@ fun ChatScreen(
         attachments = attachments + picked
     }
 
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        takeUris(uris)
+    }
+
+    // The system photo picker, which needs no permission: it hands back a read grant for only the
+    // items the user chose, so READ_MEDIA_IMAGES is never requested. androidx resolves it in
+    // three steps - ACTION_PICK_IMAGES on API 33+, an OEM system app on older devices that has
+    // one, and ACTION_OPEN_DOCUMENT otherwise - which covers minSdk 26 without branching here.
+    // MAX_ATTACHMENTS stays under MediaStore.getPickImagesMaxLimit()'s documented floor of 100,
+    // so the contract's own limit check cannot reject it.
+    val mediaPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_ATTACHMENTS)
+    ) { uris ->
+        takeUris(uris)
+    }
+
     val session = runtime?.sessions?.firstOrNull { it.id == sessionId }
     val busy = runtime?.busySessions?.contains(sessionId) == true
     val permissions = runtime?.permissions?.values?.filter { it.sessionID == sessionId }.orEmpty()
 
     LaunchedEffect(sessionId) { handle.load() }
 
+    // Keep the context meter moving during a turn. Usage is written onto a message when the turn
+    // ends, so between the start and the end there is nothing to refresh *from* - the bar would
+    // sit at its opening value for the whole of a long reply. A single-message read every half
+    // minute is cheap enough to just poll, and it catches a host that reports usage incrementally.
+    LaunchedEffect(sessionId) {
+        while (true) {
+            delay(CONTEXT_REFRESH_MS)
+            handle.refreshUsage()
+        }
+    }
+
     LaunchedEffect(session?.permissions) {
-        approvalMode = ApprovalMode.from(session)
+        approval = ApprovalSetting.from(
+            session?.permissions,
+            agents.firstOrNull { it.id == (session?.agent ?: agent) }?.permissions,
+        )
     }
 
     // The context ceiling lives on the model list, so refresh it when the session's model changes.
@@ -187,12 +242,69 @@ fun ChatScreen(
     LaunchedEffect(sessionId, server?.directory) {
         agents = repository.agents(serverId, session?.directory ?: server?.directory)
         if (agent == null) agent = session?.agent ?: agents.firstOrNull()?.id
+
+        // The agent's rules are what an inherited session runs under, so the chip cannot be
+        // resolved until this has arrived.
+        approval = ApprovalSetting.from(
+            session?.permissions,
+            agents.firstOrNull { it.id == (session?.agent ?: agent) }?.permissions,
+        )
     }
 
-    // Follow the tail as parts stream in. Permission cards live in the bottom bar, not the list,
-    // so only the transcript count matters here.
-    LaunchedEffect(entries.size) {
-        if (entries.isNotEmpty()) listState.animateScrollToItem(entries.size - 1)
+    // Adjacent tool-only turns collapse into one disclosure; without this a busy turn renders
+    // as a stack of identical "Tool calls" rows. Computed here rather than at the list so the
+    // scroll effect below works from the same list the reader actually sees.
+    val display = remember(entries) { entries.mergeToolOnlyTurns() }
+
+    // Follow the tail until the reader deliberately scrolls away from it.
+    //
+    // Only sampled while the list is being dragged. Sampling `canScrollForward` on its own would
+    // read "content is below me" the instant a streaming turn appends, which is true even while
+    // the reader is pinned to the newest line, and would switch following off by itself.
+    var followTail by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            if (listState.isScrollInProgress) listState.canScrollForward else null
+        }.collect { scrolledAway -> if (scrolledAway != null) followTail = !scrolledAway }
+    }
+
+    // Moves on every streamed delta, including text growing *inside* the final entry - the entry
+    // count stays put while the model keeps writing to the same message, so keying on the count
+    // would stop following halfway through a reply.
+    val tailSize = remember(display) {
+        display.lastOrNull()?.let { last ->
+            if (last is Entry.Assistant) {
+                last.parts.sumOf { part ->
+                    when (part) {
+                        is Part.Text -> part.text.length
+                        is Part.Reasoning -> part.text.length
+                        else -> 1
+                    }
+                }
+            } else {
+                display.size
+            }
+        } ?: 0
+    }
+
+    // Pinned to the *end* of the final entry. scrollToItem alone would put that entry's first
+    // line at the top of the screen, so a long answer would scroll up to its own beginning with
+    // every token. The large offset is clamped by the layout to the end of the item.
+    LaunchedEffect(tailSize, followTail) {
+        if (followTail && display.isNotEmpty()) {
+            listState.scrollToItem(display.lastIndex, Int.MAX_VALUE)
+        }
+    }
+
+    // Widen the window when the reader reaches the top, rather than holding the whole history
+    // from the start. Guarded on not following so the tail is never yanked by a page load.
+    val hasOlder by handle.hasOlder.collectAsStateWithLifecycle()
+    val loadingOlder by handle.isLoadingOlder.collectAsStateWithLifecycle()
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { first ->
+                if (first <= 1 && hasOlder && !loadingOlder) handle.loadMore()
+            }
     }
 
     /**
@@ -203,6 +315,12 @@ fun ChatScreen(
      */
     fun pickFiles() {
         filePicker.launch(arrayOf("*/*"))
+    }
+
+    fun pickMedia() {
+        mediaPicker.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+        )
     }
 
     fun send() {
@@ -262,62 +380,74 @@ fun ChatScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbars) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            session?.title?.takeIf { it.isNotBlank() } ?: "Session",
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
+            // The context meter gets its own full-width strip rather than a chip in the title
+            // slot. That slot already holds the title, the host name and the model, and it is
+            // bounded by the navigation icon and the actions, so anything added last there was
+            // squeezed down to a single glyph.
+            Column {
+                TopAppBar(
+                    title = {
+                        Column {
                             Text(
-                                server?.displayName.orEmpty(),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                session?.title?.takeIf { it.isNotBlank() } ?: "Session",
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
-                            session?.model?.let {
-                                StatusChip(
-                                    label = it.id,
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                // The host name is the one item here allowed to give up space: it is
+                                // the least load-bearing, and letting it ellipsize keeps the model
+                                // chip whole instead of truncating both.
+                                Text(
+                                    server?.displayName.orEmpty(),
+                                    style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
-                            }
-                            // Hidden entirely when the host reports no context ceiling, rather
-                            // than showing a misleading 0%.
-                            if (ctxFraction > 0f) {
-                                ContextMeter(fraction = ctxFraction, used = contextUsed)
+                                session?.model?.let {
+                                    StatusChip(
+                                        label = it.id,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                actions = {
-                    AnimatedVisibility(visible = busy, enter = fadeIn(), exit = fadeOut()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            LoadingIndicator(modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            IconButton(onClick = { scope.launch { repository.interrupt(serverId, sessionId) } }) {
-                                Icon(
-                                    Icons.Filled.Pause,
-                                    contentDescription = "Interrupt",
-                                    tint = MaterialTheme.colorScheme.error,
-                                )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                    actions = {
+                        AnimatedVisibility(visible = busy, enter = fadeIn(), exit = fadeOut()) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                LoadingIndicator(modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                IconButton(onClick = { scope.launch { repository.interrupt(serverId, sessionId) } }) {
+                                    Icon(
+                                        Icons.Filled.Pause,
+                                        contentDescription = "Interrupt",
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                }
                             }
                         }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ),
-            )
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    ),
+                )
+                // Hidden entirely when the host reports no context ceiling, rather than showing
+                // a misleading 0%.
+                if (ctxFraction > 0f) {
+                    ContextBar(fraction = ctxFraction, used = contextUsed)
+                }
+            }
         },
         bottomBar = {
             Column {
@@ -329,7 +459,7 @@ fun ChatScreen(
                 }
 
                 // Standing warning whenever the session will not ask before acting.
-                if (approvalMode == ApprovalMode.AutoApproveAll) {
+                if (approval.autoApproves) {
                     ApprovalBanner(
                         text = "Auto-approving everything in this session",
                         container = MaterialTheme.colorScheme.errorContainer,
@@ -372,10 +502,11 @@ fun ChatScreen(
                     onDeliveryChange = { delivery = it },
                     agentLabel = agent ?: "build",
                     onAgentClick = { agentSheet = true },
-                    approvalMode = approvalMode,
+                    approval = approval,
                     onApprovalClick = { approvalSheet = true },
                     canAttach = attachments.size < MAX_ATTACHMENTS,
                     onAttach = { pickFiles() },
+                    onAttachMedia = { pickMedia() },
                     attaching = uploading,
                 )
             }
@@ -411,9 +542,6 @@ fun ChatScreen(
                 }
 
                 else -> {
-                    // Adjacent tool-only turns collapse into one disclosure; without this a busy
-                    // turn renders as a stack of identical "Tool calls - 1 call" rows.
-                    val display = remember(entries) { entries.mergeToolOnlyTurns() }
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
@@ -426,6 +554,32 @@ fun ChatScreen(
                                 is Entry.System -> SystemNote(entry)
                                 is Entry.Assistant -> AssistantBlock(entry)
                             }
+                        }
+                    }
+
+                    // Only reachable if the reader has scrolled away from the tail, which is the
+                    // one moment where being yanked down would lose their place.
+                    AnimatedVisibility(
+                        visible = !followTail,
+                        enter = fadeIn() + scaleIn(),
+                        exit = fadeOut() + scaleOut(),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(16.dp),
+                    ) {
+                        FilledTonalIconButton(
+                            onClick = {
+                                scope.launch {
+                                    if (display.isNotEmpty()) {
+                                        listState.animateScrollToItem(display.lastIndex)
+                                    }
+                                }
+                            },
+                        ) {
+                            Icon(
+                                Icons.Filled.KeyboardArrowDown,
+                                contentDescription = "Jump to the latest message",
+                            )
                         }
                     }
                 }
@@ -444,12 +598,13 @@ fun ChatScreen(
 
     if (approvalSheet) {
         ApprovalModeSheet(
-            current = approvalMode,
+            current = approval,
             busy = applyingMode,
             onPick = { mode ->
                 applyingMode = true
                 approvalSheet = false
                 scope.launch {
+                    approval = ApprovalSetting(mode, mode.rules)
                     repository.setApprovalMode(serverId, sessionId, mode)
                         .onFailure { snackbars.showSnackbar(it.message ?: "Could not change approval mode") }
                     applyingMode = false
@@ -493,7 +648,7 @@ private fun ApprovalBanner(
 
 @Composable
 private fun ApprovalModeSheet(
-    current: ApprovalMode,
+    current: ApprovalSetting,
     busy: Boolean,
     onPick: (ApprovalMode) -> Unit,
     onDismiss: () -> Unit,
@@ -507,10 +662,20 @@ private fun ApprovalModeSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // When the host's rules are none of the presets, all three would render unselected
+            // with nothing explaining why. Say what is actually in force instead.
+            if (current.mode == null) {
+                VerticalGap(8)
+                Text(
+                    current.summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
             VerticalGap(12)
 
             ApprovalMode.entries.forEach { mode ->
-                val selected = mode == current
+                val selected = mode == current.mode
                 val tint = if (mode == ApprovalMode.AutoApproveAll) {
                     MaterialTheme.colorScheme.error
                 } else if (selected) {
@@ -610,7 +775,7 @@ private fun AssistantBlock(entry: Entry.Assistant) {
                     )
                 }
 
-                is Part.Reasoning -> ReasoningBlock(part)
+                is Part.Reasoning -> ReasoningBlock(part, streaming = entry.busy)
 
                 is Part.Tool -> Unit // handled by ToolCallsSection
             }
@@ -628,7 +793,7 @@ private fun AssistantBlock(entry: Entry.Assistant) {
             }
         }
 
-        ToolCallsSection(tools = tools, running = entry.busy)
+        ToolCallsSection(tools = tools, running = entry.busy, sectionKey = entry.id)
 
         entry.error?.let { error ->
             Card(
@@ -653,24 +818,52 @@ private fun AssistantBlock(entry: Entry.Assistant) {
     }
 }
 
-/** Context-window occupancy for the top bar. */
+/**
+ * Context-window occupancy, as a full-width strip under the app bar.
+ *
+ * A bar rather than a chip because it cannot be truncated: however long the session title and
+ * model id get, this keeps its whole width. The percentage rides alongside so the number is still
+ * readable at a glance instead of having to be eyeballed off the bar's length.
+ */
 @Composable
-private fun ContextMeter(fraction: Float, used: Long) {
-    val status = LocalStatusColors.current
-    val tint = when {
-        fraction >= 0.9f -> MaterialTheme.colorScheme.error
-        fraction >= 0.75f -> MaterialTheme.colorScheme.tertiary
-        else -> status.running
+private fun ContextBar(fraction: Float, used: Long) {
+    val tint = contextTint(fraction)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
+    ) {
+        LinearProgressIndicator(
+            progress = { fraction },
+            color = tint,
+            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            modifier = Modifier.weight(1f).height(4.dp),
+        )
+        Text(
+            "${(fraction * 100).toInt()}% · ${formatTokens(used)}",
+            style = MaterialTheme.typography.labelSmall,
+            color = tint,
+            maxLines = 1,
+        )
     }
-    StatusChip(
-        label = "${(fraction * 100).toInt()}% ctx · ${formatTokens(used)}",
-        color = tint,
-    )
+}
+
+/** Green while there is room, then a warning, then an error as the window fills. */
+@Composable
+private fun contextTint(fraction: Float): Color = when {
+    fraction >= 0.9f -> MaterialTheme.colorScheme.error
+    fraction >= 0.75f -> MaterialTheme.colorScheme.tertiary
+    else -> LocalStatusColors.current.running
 }
 
 @Composable
-private fun ReasoningBlock(part: Part.Reasoning) {
-    var expanded by remember { mutableStateOf(false) }
+private fun ReasoningBlock(part: Part.Reasoning, streaming: Boolean) {
+    // Keyed on the part: unkeyed, Compose reuses one slot across messages and a block left open
+    // in an earlier turn would greet you already expanded.
+    var expanded by remember(part.ordinal) { mutableStateOf(false) }
     val alpha by animateFloatAsState(if (expanded) 1f else 0.65f, label = "reasonAlpha")
 
     Column(
@@ -705,17 +898,28 @@ private fun ReasoningBlock(part: Part.Reasoning) {
             )
         }
 
-        AnimatedVisibility(
-            visible = expanded,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut(),
-        ) {
+        val body: @Composable () -> Unit = {
             Text(
                 text = part.text,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
                 modifier = Modifier.padding(top = 8.dp),
             )
+        }
+
+        if (expanded && streaming) {
+            // No transition while the text is still arriving. The target height changes on every
+            // delta, so an expand animation restarts each time and reads as the panel reopening
+            // over and over while yanking the viewport to its top.
+            body()
+        } else {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                body()
+            }
         }
     }
 }
@@ -733,12 +937,15 @@ private fun Composer(
     onDeliveryChange: (Delivery) -> Unit,
     agentLabel: String,
     onAgentClick: () -> Unit,
-    approvalMode: ApprovalMode,
+    approval: ApprovalSetting,
     onApprovalClick: () -> Unit,
     canAttach: Boolean,
     onAttach: () -> Unit,
+    onAttachMedia: () -> Unit,
     attaching: Boolean,
 ) {
+    var attachMenuOpen by remember { mutableStateOf(false) }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
         tonalElevation = 2.dp,
@@ -794,28 +1001,55 @@ private fun Composer(
 
                 Spacer(Modifier.weight(1f))
 
-                ApprovalChip(mode = approvalMode, onClick = onApprovalClick)
+                ApprovalChip(setting = approval, onClick = onApprovalClick)
             }
 
             Row(verticalAlignment = Alignment.Bottom) {
                 // Circular "+" on the left: it reads as "add something to this message" and keeps
                 // the text field's full width, which the paperclip-on-the-right layout ate into.
-                FilledTonalIconButton(
-                    onClick = onAttach,
-                    enabled = canAttach && !attaching,
-                    modifier = Modifier.size(52.dp),
-                    shape = CircleShape,
-                ) {
-                    if (attaching) {
-                        LoadingIndicator(
-                            modifier = Modifier.size(18.dp),
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                // The button is a menu rather than a direct action because the two pickers are
+                // genuinely different: media goes through the permissionless photo picker, files
+                // through the document picker.
+                Box {
+                    FilledTonalIconButton(
+                        onClick = { attachMenuOpen = true },
+                        enabled = canAttach && !attaching,
+                        modifier = Modifier.size(52.dp),
+                        shape = CircleShape,
+                    ) {
+                        if (attaching) {
+                            LoadingIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Add,
+                                contentDescription = "Attach media or a file",
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = attachMenuOpen,
+                        onDismissRequest = { attachMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Photos & videos") },
+                            leadingIcon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = null) },
+                            onClick = {
+                                attachMenuOpen = false
+                                onAttachMedia()
+                            },
                         )
-                    } else {
-                        Icon(
-                            Icons.Filled.Add,
-                            contentDescription = "Attach a file",
-                            modifier = Modifier.size(22.dp),
+                        DropdownMenuItem(
+                            text = { Text("Files") },
+                            leadingIcon = { Icon(Icons.Filled.AttachFile, contentDescription = null) },
+                            onClick = {
+                                attachMenuOpen = false
+                                onAttach()
+                            },
                         )
                     }
                 }
@@ -882,17 +1116,20 @@ private fun Composer(
 
 /** Chip that reflects, and changes, how much the agent may do without asking. */
 @Composable
-private fun ApprovalChip(mode: ApprovalMode, onClick: () -> Unit) {
-    val tint = when (mode) {
-        ApprovalMode.AutoApproveAll -> MaterialTheme.colorScheme.error
-        ApprovalMode.AutoRead -> MaterialTheme.colorScheme.tertiary
-        ApprovalMode.AskEveryTime -> MaterialTheme.colorScheme.onSurfaceVariant
+private fun ApprovalChip(setting: ApprovalSetting, onClick: () -> Unit) {
+    // Tint by what the agent will actually do, so a host ruleset that allows broadly warns like
+    // a full auto-approve rather than sitting greyed out beside it.
+    val tint = when {
+        setting.mode == ApprovalMode.AutoApproveAll || setting.autoApproves ->
+            MaterialTheme.colorScheme.error
+        setting.mode == ApprovalMode.AutoRead -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     AssistChip(
         onClick = onClick,
         label = {
             Text(
-                text = mode.label,
+                text = setting.label,
                 maxLines = 1,
                 style = MaterialTheme.typography.labelMedium,
                 color = tint,
@@ -900,7 +1137,7 @@ private fun ApprovalChip(mode: ApprovalMode, onClick: () -> Unit) {
         },
         leadingIcon = {
             Icon(
-                if (mode == ApprovalMode.AskEveryTime) Icons.Filled.Shield else Icons.Filled.ShieldMoon,
+                if (setting.mode == ApprovalMode.AskEveryTime) Icons.Filled.Shield else Icons.Filled.ShieldMoon,
                 contentDescription = "Auto approval",
                 modifier = Modifier.size(16.dp),
                 tint = tint,
