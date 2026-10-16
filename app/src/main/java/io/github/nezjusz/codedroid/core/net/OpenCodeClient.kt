@@ -191,10 +191,18 @@ class OpenCodeClient(
     suspend fun session(sessionID: String): SessionInfo =
         decode<DataEnvelope<SessionInfo>>(get("/api/session/$sessionID")).data
 
-    suspend fun messages(sessionID: String, limit: Int = 150): List<MessageInfo> =
+    /**
+     * Loads the newest [limit] messages.
+     *
+     * `order=asc` with a limit returns the *oldest* N, which silently hides the most recent turns
+     * once a session grows past the limit — the phone then looks frozen while the agent is
+     * visibly working. Descending and reversing yields the tail of the conversation, which is the
+     * part a person actually wants.
+     */
+    suspend fun messages(sessionID: String, limit: Int = 200): List<MessageInfo> =
         OpenCodeJson.decodeFromString<MessagesResponse>(
-            get("/api/session/$sessionID/message", mapOf("limit" to limit.toString(), "order" to "asc"))
-        ).data
+            get("/api/session/$sessionID/message", mapOf("limit" to limit.toString(), "order" to "desc"))
+        ).data.reversed()
 
     suspend fun createSession(
         directory: String,

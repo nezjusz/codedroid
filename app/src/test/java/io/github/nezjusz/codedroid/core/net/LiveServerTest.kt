@@ -88,6 +88,41 @@ class LiveServerTest {
     }
 
     @Test
+    fun `messages come back oldest-first even when the session overflows the limit`() = runBlocking {
+        // Regression: `order=asc` with a limit returns the OLDEST n, so on a session longer than
+        // the limit the newest turns were never fetched and the chat screen looked frozen while
+        // the agent was visibly working. This asserts the two properties that fix depends on:
+        // chronological order, and that the tail is genuinely the newest message on the host.
+        requireServer()
+        val client = client()
+        val sessions = client.sessions(limit = 5)
+        assumeTrue("host has no sessions", sessions.isNotEmpty())
+        val sessionID = sessions.first().id
+
+        val page = client.messages(sessionID, limit = 5)
+        assumeTrue("session too short to exercise paging", page.size >= 5)
+
+        val times = page.mapNotNull { it.time?.created }
+        if (times.size >= 2) {
+            assertTrue(
+                "messages must be chronological, got ${page.map { it.id }}",
+                times.zipWithNext().all { (a, b) -> a <= b },
+            )
+        }
+
+        // Ask the host for everything it will serve and confirm the limited page ends on the same
+        // message. If the ordering regressed, this is where it shows up. The host rejects a
+        // limit above 200, so that is as much as one request can return.
+        val everything = client.messages(sessionID, limit = 200)
+        assumeTrue("could not read the full session", everything.size > page.size)
+        assertEquals(
+            "a limited page must end on the newest message, not the oldest window of one",
+            everything.last().id,
+            page.last().id,
+        )
+    }
+
+    @Test
     fun `agents and models decode`() = runBlocking {
         requireServer()
         client().agents(null)
