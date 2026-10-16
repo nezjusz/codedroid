@@ -164,23 +164,6 @@ private fun AttachmentRow(
     }
 }
 
-/** Attachment button; hidden entirely when nothing can be attached. */
-@Composable
-fun AttachButton(
-    enabled: Boolean,
-    busy: Boolean,
-    onPick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    IconButton(onClick = onPick, enabled = enabled && !busy, modifier = modifier.size(40.dp)) {
-        if (busy) {
-            LoadingIndicator(modifier = Modifier.size(16.dp))
-        } else {
-            Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file")
-        }
-    }
-}
-
 private fun formatBytes(bytes: Long): String = when {
     bytes >= 1_000_000 -> String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
     bytes >= 1_000 -> String.format(Locale.US, "%.0f KB", bytes / 1_000.0)

@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -86,6 +87,8 @@ import io.github.nezjusz.codedroid.core.data.Attachment
 import io.github.nezjusz.codedroid.core.data.AttachmentState
 import io.github.nezjusz.codedroid.core.data.Entry
 import io.github.nezjusz.codedroid.core.data.OpenCodeRepository
+import io.github.nezjusz.codedroid.core.data.contextFraction
+import io.github.nezjusz.codedroid.core.data.mergeToolOnlyTurns
 import io.github.nezjusz.codedroid.core.data.Part
 import io.github.nezjusz.codedroid.core.data.SavedServer
 import io.github.nezjusz.codedroid.core.data.ServerRuntime
@@ -100,7 +103,9 @@ import io.github.nezjusz.codedroid.ui.components.StatusChip
 import io.github.nezjusz.codedroid.ui.components.ToolCallsSection
 import io.github.nezjusz.codedroid.ui.components.UsageLine
 import io.github.nezjusz.codedroid.ui.components.VerticalGap
+import io.github.nezjusz.codedroid.ui.components.formatTokens
 import io.github.nezjusz.codedroid.ui.markdown.MarkdownText
+import io.github.nezjusz.codedroid.ui.theme.LocalStatusColors
 import kotlinx.coroutines.launch
 
 /** Most files a single prompt can carry. */
@@ -166,6 +171,17 @@ fun ChatScreen(
 
     LaunchedEffect(session?.permissions) {
         approvalMode = ApprovalMode.from(session)
+    }
+
+    // The context ceiling lives on the model list, so refresh it when the session's model changes.
+    LaunchedEffect(sessionId, session?.model?.id) {
+        handle.setContextLimit(repository.contextLimitFor(serverId, session?.model))
+    }
+    val contextUsed by handle.contextUsed.collectAsStateWithLifecycle()
+    val contextLimit by handle.contextLimit.collectAsStateWithLifecycle()
+    // 0f while the ceiling is unknown, which the top bar reads as "show nothing" rather than 0%.
+    val ctxFraction = remember(contextUsed, contextLimit) {
+        contextFraction(contextUsed, contextLimit)
     }
 
     LaunchedEffect(sessionId, server?.directory) {
@@ -269,6 +285,11 @@ fun ChatScreen(
                                     label = it.id,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                            }
+                            // Hidden entirely when the host reports no context ceiling, rather
+                            // than showing a misleading 0%.
+                            if (ctxFraction > 0f) {
+                                ContextMeter(fraction = ctxFraction, used = contextUsed)
                             }
                         }
                     }
@@ -390,13 +411,16 @@ fun ChatScreen(
                 }
 
                 else -> {
+                    // Adjacent tool-only turns collapse into one disclosure; without this a busy
+                    // turn renders as a stack of identical "Tool calls - 1 call" rows.
+                    val display = remember(entries) { entries.mergeToolOnlyTurns() }
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        items(entries, key = { it.id }) { entry ->
+                        items(display, key = { it.id }) { entry ->
                             when (entry) {
                                 is Entry.User -> UserBubble(entry)
                                 is Entry.System -> SystemNote(entry)
@@ -621,10 +645,27 @@ private fun AssistantBlock(entry: Entry.Assistant) {
             }
         }
 
-        if (!entry.busy && (entry.cost > 0 || (entry.tokens?.total ?: 0L) > 0L)) {
+        if (!entry.busy && (entry.cost > 0 || (entry.tokens?.total ?: 0L) > 0L) && narrative.isNotEmpty()) {
+            // Only when the turn said something. A tool-only turn renders as a single collapsed
+            // row, and a stray token count under each one just reads as noise.
             UsageLine(cost = entry.cost, tokens = entry.tokens?.total ?: 0L)
         }
     }
+}
+
+/** Context-window occupancy for the top bar. */
+@Composable
+private fun ContextMeter(fraction: Float, used: Long) {
+    val status = LocalStatusColors.current
+    val tint = when {
+        fraction >= 0.9f -> MaterialTheme.colorScheme.error
+        fraction >= 0.75f -> MaterialTheme.colorScheme.tertiary
+        else -> status.running
+    }
+    StatusChip(
+        label = "${(fraction * 100).toInt()}% ctx · ${formatTokens(used)}",
+        color = tint,
+    )
 }
 
 @Composable
@@ -740,7 +781,14 @@ private fun Composer(
                     AssistChip(
                         onClick = { },
                         label = { Text("Working") },
-                        leadingIcon = { LoadingIndicator(modifier = Modifier.size(12.dp)) },
+                        leadingIcon = {
+                            // Explicit size and colour: at smaller sizes the expressive shape
+                            // renders too faint to see inside the chip's icon slot.
+                            LoadingIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        },
                     )
                 }
 
@@ -750,6 +798,30 @@ private fun Composer(
             }
 
             Row(verticalAlignment = Alignment.Bottom) {
+                // Circular "+" on the left: it reads as "add something to this message" and keeps
+                // the text field's full width, which the paperclip-on-the-right layout ate into.
+                FilledTonalIconButton(
+                    onClick = onAttach,
+                    enabled = canAttach && !attaching,
+                    modifier = Modifier.size(52.dp),
+                    shape = CircleShape,
+                ) {
+                    if (attaching) {
+                        LoadingIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    } else {
+                        Icon(
+                            Icons.Filled.Add,
+                            contentDescription = "Attach a file",
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(8.dp))
+
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChange,
@@ -766,13 +838,8 @@ private fun Composer(
                     maxLines = 6,
                     shape = MaterialTheme.shapes.large,
                 )
-                Spacer(Modifier.width(8.dp))
-                AttachButton(
-                    enabled = canAttach,
-                    busy = attaching,
-                    onPick = onAttach,
-                )
 
+                Spacer(Modifier.width(8.dp))
                 FilledIconButton(
                     onClick = onSend,
                     enabled = enabled && draft.isNotBlank(),
