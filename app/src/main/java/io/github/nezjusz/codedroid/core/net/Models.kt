@@ -229,6 +229,15 @@ data class ModelInfo(
     val providerID: String = "",
     val name: String = "",
     val enabled: Boolean = true,
+    val limit: ModelLimit? = null,
+)
+
+/** Context and output ceilings for a model. */
+@Serializable
+data class ModelLimit(
+    val context: Long = 0,
+    val input: Long = 0,
+    val output: Long = 0,
 )
 
 @Serializable

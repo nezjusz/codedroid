@@ -485,6 +485,22 @@ class OpenCodeRepository(
     }
 
     /**
+     * Context ceiling for a session's current model, or 0 when the host does not report one.
+     *
+     * Keyed on `provider/id` because the model list is provider-scoped while a session's model
+     * reference carries both halves.
+     */
+    fun contextLimitFor(serverId: String, model: ModelRef?): Long {
+        if (model == null) return 0
+        val key = "${model.providerID}/${model.id}"
+        return metadata(serverId).models
+            .firstOrNull { "${it.providerID}/${it.id}" == key }
+            ?.limit?.context
+            ?.takeIf { it > 0 }
+            ?: 0
+    }
+
+    /**
      * Where uploads land.
      *
      * Prefers the server's own tmp directory, which keeps attachments out of the project tree where
@@ -622,6 +638,29 @@ class TranscriptHandle(
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
     val entries: StateFlow<List<Entry>> = _entries.asStateFlow()
 
+    /**
+     * Context window occupancy in tokens, as reported by the most recent assistant message.
+     *
+     * `input` is what that turn added and `cache.read` is the prefix already resident, so their
+     * sum approximates how much of the window the conversation currently occupies. The
+     * session-level `cache.read` is deliberately not used: it accumulates across every turn and
+     * runs to hundreds of millions, which would peg any progress bar.
+     */
+    private val _contextUsed = MutableStateFlow(0L)
+    val contextUsed: StateFlow<Long> = _contextUsed.asStateFlow()
+
+    /**
+     * Ceiling for the session's model. 0 until the host tells us, and deliberately observable:
+     * it resolves after first composition, so a caller caching the fraction on anything but this
+     * value would keep showing nothing.
+     */
+    private val _contextLimit = MutableStateFlow(0L)
+    val contextLimit: StateFlow<Long> = _contextLimit.asStateFlow()
+
+    fun setContextLimit(tokens: Long) {
+        _contextLimit.value = tokens
+    }
+
     private val loading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = loading.asStateFlow()
 
@@ -633,6 +672,12 @@ class TranscriptHandle(
             loading.value = true
             val messages = repo.client(serverId).messages(sessionID)
             transcript.seed(sessionID, messages)
+            messages.lastOrNull { it.tokens != null }?.let { usage ->
+                val tokens = usage.tokens ?: return@let
+                val cacheRead = (tokens.cache?.get("read") as? JsonPrimitive)
+                    ?.content?.toLongOrNull() ?: 0L
+                _contextUsed.value = tokens.input + cacheRead
+            }
             emit(transcript.ordered)
         } catch (e: Exception) {
             Log.w("Transcript", "load failed for $sessionID: ${e.message}")
@@ -666,3 +711,14 @@ class TranscriptHandle(
         _entries.value = entries
     }
 }
+
+/**
+ * Fraction of the context window occupied, or 0f when the ceiling is unknown.
+ *
+ * A zero limit means the host did not report one, not that the window is empty, and the UI hides
+ * the indicator rather than claiming 0%. Clamped at both ends because a usage figure can
+ * overshoot the nominal ceiling (output counted against the same window, a stale limit after a
+ * model swap) and a progress bar that renders past its track looks broken.
+ */
+fun contextFraction(used: Long, limit: Long): Float =
+    if (limit <= 0L) 0f else (used.toFloat() / limit).coerceIn(0f, 1f)
