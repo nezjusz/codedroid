@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  opencode servers are normally self-hosted and reached over plain HTTP on a LAN or over a VPN
+  such as Tailscale, at an address the user types in when pairing.
+
+  Android's <domain> entries match an exact hostname or a domain suffix. They do NOT understand
+  CIDR ranges: an entry like 10.0.0.0 matches only the literal address 10.0.0.0, never a
+  neighbouring host on the subnet. There is no way to express 10.0.0.0/8 or Tailscale's
+  100.64.0.0/10 here, and the server address is not known until pairing, so cleartext has to be
+  permitted at the base config.
+
+  The exposure is bounded: this app only talks to the hosts you pair yourself, and https:// hosts
+  still get full certificate validation against the system trust store.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

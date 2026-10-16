@@ -1,0 +1,24 @@
+# Normalise line endings so the repo is consistent across platforms.
+* text=auto eol=lf
+
+# Windows batch files require CRLF
+*.bat  text eol=crlf
+*.cmd text eol=crlf
+
+*.kt     text diff=kotlin
+*.kts    text diff=kotlin
+*.java   text diff=java
+*.xml    text
+*.json   text
+*.md     text
+*.toml   text
+*.pro    text
+*.properties text
+
+# Binary assets
+*.apk    binary
+*.jar    binary
+*.png    binary
+*.webp   binary
+*.ttf    binary
+*.otf    binary
