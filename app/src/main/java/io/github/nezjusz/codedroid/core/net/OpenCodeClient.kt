@@ -345,9 +345,23 @@ class OpenCodeClient(
     private fun locationParams(directory: String?): Map<String, String?> =
         if (directory.isNullOrBlank()) emptyMap() else mapOf("location[directory]" to directory)
 
-    suspend fun agents(directory: String?): List<AgentInfo> =
-        OpenCodeJson.decodeFromString<AgentEnvelope>(get("/api/agent", locationParams(directory)))
-            .data.filter { !it.hidden }
+    /**
+     * Agents available on this host.
+     *
+     * The host answers this with 400 when the location query is attached - `/api/model` tolerates
+     * the same parameter, so it is specific to this endpoint. That failure was invisible: the
+     * caller defaults an empty list, and an inherited session then had no agent rules to read,
+     * so the approval chip reported the safest preset for an agent that allows nearly
+     * everything. Retrying unscoped recovers the list and, with it, the real permission state.
+     */
+    suspend fun agents(directory: String?): List<AgentInfo> {
+        val params = locationParams(directory)
+        val agents = runCatching {
+            OpenCodeJson.decodeFromString<AgentEnvelope>(get("/api/agent", params)).data
+        }.getOrNull()
+            ?: OpenCodeJson.decodeFromString<AgentEnvelope>(get("/api/agent")).data
+        return agents.filter { !it.hidden }
+    }
 
     suspend fun models(directory: String?): List<ModelInfo> =
         OpenCodeJson.decodeFromString<ModelEnvelope>(get("/api/model", locationParams(directory)))
@@ -391,9 +405,15 @@ class OpenCodeClient(
                 )
             }
         }
-        return decode<DataEnvelope<SessionInfo>>(
-            patch("/api/session/$sessionID", buildJsonObject { put("permissions", array) })
-        ).data
+        val body = patch("/api/session/$sessionID", buildJsonObject { put("permissions", array) })
+
+        // The host answers this PATCH with 204 and an empty body. Decoding it anyway failed with
+        // "Expected start of the object '{', but had 'EOF'", which surfaced as a raw parser error
+        // in a snackbar. Reading the session back keeps the caller's contract - it still gets the
+        // updated session - instead of inventing one from an empty payload.
+        if (body.isBlank()) return session(sessionID)
+
+        return decode<DataEnvelope<SessionInfo>>(body).data
     }
 
     // ----------------------------------------------------------------- events
@@ -430,11 +450,19 @@ class OpenCodeClient(
                         r.body.source().let { source ->
                             // opencode sends unnamed `message` events: the payload's own `type`
                             // field is the discriminator, and `:` lines are keep-alive comments.
+                            //
+                            // The client-wide read timeout is disabled for this endpoint, which
+                            // leaves a half-open socket - host asleep, VPN dropped, laptop lid
+                            // closed - blocking here forever with the app still claiming to be
+                            // live. A per-read deadline turns that stall into an IOException so
+                            // the flow closes and the repository reconnects and shows Offline.
+                            source.timeout().timeout(SSE_IDLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                             while (!source.exhausted()) {
                                 val line = source.readUtf8LineStrict() ?: break
                                 if (line.isEmpty()) {
                                     continue
                                 } else if (line.startsWith(":")) {
+                                    // Keep-alive: activity, so the idle clock restarts.
                                     continue
                                 } else if (line.startsWith("data:")) {
                                     decodeEvent(line.removePrefix("data:").trim())?.let { trySend(it) }
@@ -451,6 +479,7 @@ class OpenCodeClient(
 
         awaitClose { call.cancel() }
     }
+
 
     /** Parses one SSE `data:` payload into a typed [OcEvent], or null when unrecognised. */
     fun decodeEvent(payload: String): OcEvent? {
@@ -596,6 +625,15 @@ class OpenCodeClient(
     companion object {
         /** The only content type the host's write endpoint accepts. */
         private const val OCTET_STREAM = "application/octet-stream"
+
+        /**
+         * How long the event stream may go without sending anything before it is considered dead.
+         *
+         * A deadline per read, not for the stream, so any event or keep-alive comment resets it.
+         * Long enough not to fight a host that heartbeats, short enough that walking out of range
+         * shows as Offline rather than as a stale "Live" that never updates again.
+         */
+        private const val SSE_IDLE_TIMEOUT_MS = 60_000L
 
         /** Normalises user input such as `192.168.1.5:4096` into `http://192.168.1.5:4096`. */
         fun normalizeBaseUrl(raw: String): String {
