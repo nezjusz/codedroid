@@ -24,9 +24,12 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -67,6 +70,7 @@ data class ServerRuntime(
 class OpenCodeRepository(
     private val store: ServerStore,
     private val notifier: Notifier,
+    private val isForeground: () -> Boolean = { false },
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -349,13 +353,18 @@ class OpenCodeRepository(
                     current.copy(busySessions = busy)
                 }
                 if (event.phase != "started") {
-                    liveTranscript(serverId, event.sessionID)?.markFinished(
-                        when (event.phase) {
-                            "succeeded" -> "stop"
-                            "failed" -> "error"
-                            else -> "interrupt"
-                        }
-                    )
+                    liveTranscript(serverId, event.sessionID)?.let { handle ->
+                        handle.markFinished(
+                            when (event.phase) {
+                                "succeeded" -> "stop"
+                                "failed" -> "error"
+                                else -> "interrupt"
+                            }
+                        )
+                        // Usage lands on the message only once the turn is over, so this is the
+                        // first moment the context meter has anything new to show.
+                        handle.refreshUsage()
+                    }
                     refreshSessions(serverId)
                     if (event.phase == "succeeded" || event.phase == "failed") {
                         if (server.notifyCompletion) {
@@ -373,13 +382,22 @@ class OpenCodeRepository(
                 }
                 announced.getOrPut(serverId) { ConcurrentHashMap.newKeySet() }.add(event.request.id)
                 if (server.notifyPermissions) {
-                    notifier.permissionRequest(serverId, server.displayName, event.request)
+                    // A notification while the session is on screen duplicates the card that is
+                    // already there and puts a system shade entry in front of the user. They see
+                    // it, so nudge the device instead of interrupting them.
+                    if (isForeground()) notifier.lightTick()
+                    else notifier.permissionRequest(serverId, server.displayName, event.request)
                 }
                 refreshSessions(serverId)
             }
 
-            is OcEvent.PermissionSettled -> mutate(serverId) {
-                it.copy(permissions = it.permissions - event.requestID)
+            is OcEvent.PermissionSettled -> {
+                // Backstop for every route out of a request, including a reply sent from the
+                // in-app card while the app was foregrounded and no notification was ever posted.
+                notifier.cancelPermission(event.sessionID, event.requestID)
+                mutate(serverId) {
+                    it.copy(permissions = it.permissions - event.requestID)
+                }
             }
 
             is OcEvent.ProjectUpsert -> mutate(serverId) { current ->
@@ -666,18 +684,29 @@ class TranscriptHandle(
 
     private val loadMutex = Mutex()
 
+    /**
+     * How many of the newest messages to hold.
+     *
+     * Starts small so opening a chat on a phone is not a megabyte of history, and grows as the
+     * reader scrolls back. Capped at what the host will serve in one request.
+     */
+    private val window = MutableStateFlow(INITIAL_WINDOW)
+
+    /** True when [loadMore] would actually fetch something more. */
+    val hasOlder: StateFlow<Boolean> =
+        window.map { it < MAX_WINDOW }.stateIn(scope, SharingStarted.Eagerly, false)
+
+    private val loadingOlder = MutableStateFlow(false)
+    val isLoadingOlder: StateFlow<Boolean> = loadingOlder.asStateFlow()
+
     suspend fun load() {
         if (!loadMutex.tryLock()) return
         try {
             loading.value = true
-            val messages = repo.client(serverId).messages(sessionID)
+            val limit = window.value.coerceAtMost(MAX_WINDOW)
+            val messages = repo.client(serverId).messages(sessionID, limit = limit)
             transcript.seed(sessionID, messages)
-            messages.lastOrNull { it.tokens != null }?.let { usage ->
-                val tokens = usage.tokens ?: return@let
-                val cacheRead = (tokens.cache?.get("read") as? JsonPrimitive)
-                    ?.content?.toLongOrNull() ?: 0L
-                _contextUsed.value = tokens.input + cacheRead
-            }
+            applyContextUsage(messages)
             emit(transcript.ordered)
         } catch (e: Exception) {
             Log.w("Transcript", "load failed for $sessionID: ${e.message}")
@@ -685,6 +714,54 @@ class TranscriptHandle(
             loading.value = false
             loadMutex.unlock()
         }
+    }
+
+    /**
+     * Re-reads the newest message's token counts.
+     *
+     * The context meter was frozen for the whole of a turn because usage is only carried on a
+     * finished message, and nothing else updates it until the chat is reopened. Asking for a
+     * single message keeps this to one cheap request rather than refetching the whole window on
+     * every event.
+     */
+    fun refreshUsage() {
+        scope.launch {
+            runCatching {
+                repo.client(serverId).messages(sessionID, limit = 1)
+            }.onSuccess { latest ->
+                if (latest.isNotEmpty()) applyContextUsage(latest)
+            }.onFailure { Log.w("Transcript", "usage refresh failed: ${it.message}") }
+        }
+    }
+
+    private fun applyContextUsage(messages: List<io.github.nezjusz.codedroid.core.net.MessageInfo>) {
+        val usage = messages.lastOrNull { it.tokens != null } ?: return
+        val tokens = usage.tokens ?: return
+        val cacheRead = (tokens.cache?.get("read") as? JsonPrimitive)
+            ?.content?.toLongOrNull() ?: 0L
+        _contextUsed.value = tokens.input + cacheRead
+    }
+
+    /** Widens the window by one page. A no-op at [MAX_WINDOW]. */
+    fun loadMore() {
+        if (window.value >= MAX_WINDOW || loadingOlder.value) return
+        loadingOlder.value = true
+        window.value = (window.value + PAGE).coerceAtMost(MAX_WINDOW)
+        scope.launch {
+            load()
+            loadingOlder.value = false
+        }
+    }
+
+    private companion object {
+        /** Newest messages held on open: enough to read a reply, not enough to be slow. */
+        const val INITIAL_WINDOW = 60
+
+        /** Added per scroll-up. */
+        const val PAGE = 60
+
+        /** The host rejects a limit above this, so it is the ceiling on history we can page. */
+        const val MAX_WINDOW = 200
     }
 
     fun refresh() {
