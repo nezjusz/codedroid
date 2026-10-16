@@ -122,36 +122,34 @@ class SessionHistorySafetyTest {
 
     @Test
     fun `approval mode is inferred from the host's ruleset`() {
-        val allowAll = SessionInfo(
-            id = "ses_x",
-            permissions = listOf(PermissionRule("*", "*", "allow")),
-            time = io.github.nezjusz.codedroid.core.net.SessionTime(),
-        )
-        assertEquals(ApprovalMode.AutoApproveAll, ApprovalMode.from(allowAll))
+        val allowAll = listOf(PermissionRule("*", "*", "allow"))
+        assertEquals(ApprovalMode.AutoApproveAll, ApprovalSetting.from(allowAll, null).mode)
 
-        val askAll = SessionInfo(
-            id = "ses_y",
-            permissions = listOf(PermissionRule("*", "*", "ask")),
-            time = io.github.nezjusz.codedroid.core.net.SessionTime(),
-        )
-        assertEquals(ApprovalMode.AskEveryTime, ApprovalMode.from(askAll))
+        val askAll = listOf(PermissionRule("*", "*", "ask"))
+        assertEquals(ApprovalMode.AskEveryTime, ApprovalSetting.from(askAll, null).mode)
 
-        val readThenAsk = SessionInfo(
-            id = "ses_z",
-            permissions = listOf(
-                PermissionRule("read", "*", "allow"),
-                PermissionRule("*", "*", "ask"),
-            ),
-            time = io.github.nezjusz.codedroid.core.net.SessionTime(),
+        val readThenAsk = listOf(
+            PermissionRule("read", "*", "allow"),
+            PermissionRule("*", "*", "ask"),
         )
-        assertEquals(ApprovalMode.AutoRead, ApprovalMode.from(readThenAsk))
+        assertEquals(ApprovalMode.AutoRead, ApprovalSetting.from(readThenAsk, null).mode)
     }
 
     @Test
-    fun `a session with no explicit ruleset reads as the safe mode`() {
+    fun `a session with no explicit ruleset falls back to its agent's`() {
+        // It no longer reads as the safe mode: the session runs under its agent, and the stock
+        // build agent allows everything except .env reads. See ApprovalSettingTest for the rules.
         val inherited = SessionInfo(id = "ses_a", time = io.github.nezjusz.codedroid.core.net.SessionTime())
-        assertEquals(ApprovalMode.AskEveryTime, ApprovalMode.from(inherited))
-        assertEquals(ApprovalMode.AskEveryTime, ApprovalMode.from(null))
+        val agentAllows = listOf(
+            PermissionRule("*", "*", "allow"),
+            PermissionRule("read", "*.env", "ask"),
+        )
+        val setting = ApprovalSetting.from(inherited.permissions, agentAllows)
+        assertNull(setting.mode)
+        assertTrue(setting.autoApproves)
+
+        // With nothing known at all, the safe reading stands.
+        assertEquals(ApprovalMode.AskEveryTime, ApprovalSetting.from(null, null).mode)
     }
 
     @Test

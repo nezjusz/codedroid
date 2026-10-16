@@ -220,6 +220,15 @@ data class AgentInfo(
     val description: String? = null,
     val mode: String = "primary",
     val hidden: Boolean = false,
+    /**
+     * The agent's own ruleset.
+     *
+     * This is what a session actually runs under: a session's `permissions` is null unless it
+     * has been given an explicit set, in which case it inherits these. Dropping the field made
+     * every inherited session look like "ask every time" when the default agent allows almost
+     * everything.
+     */
+    val permissions: List<PermissionRule>? = null,
 )
 
 @Serializable
