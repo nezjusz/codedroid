@@ -59,8 +59,13 @@ jobs:
 
       - name: Accept SDK licenses and install packages
         run: |
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+          # The runner image ships cmdline-tools under a versioned directory that is not on PATH,
+          # and the version changes over time, so resolve it rather than hardcoding a path.
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)"
+          echo "Using $SDKMANAGER"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
 
       - name: Restore release keystore
         # Absent secrets are tolerated: the build then falls back to the debug key and the release
