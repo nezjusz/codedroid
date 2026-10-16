@@ -18,6 +18,9 @@ class CodeDroidApp : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // Starts false: the process can exist for its foreground service long before anything is
+        // on screen, and treating that as foreground would suppress notifications that matter.
+        container.foreground.isForeground = false
         container.bootstrap()
     }
 }
@@ -27,7 +30,16 @@ class AppContainer(private val app: Application) {
 
     val notifier = Notifier(app)
     val serverStore = ServerStore(app)
-    val repository = OpenCodeRepository(serverStore, notifier)
+    val repository = OpenCodeRepository(serverStore, notifier) { foreground.isForeground }
+
+    /**
+     * Whether any activity of this process is on screen.
+     *
+     * Read from the repository when an approval lands, which is not a Compose context. A plain
+     * volatile flag is enough: the only decision is "post a notification, or don't", and that has
+     * to be read at the moment the event arrives rather than observed.
+     */
+    val foreground = ForegroundState()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -42,4 +54,9 @@ class AppContainer(private val app: Application) {
             }
         }
     }
+}
+
+class ForegroundState {
+    @Volatile
+    var isForeground: Boolean = false
 }

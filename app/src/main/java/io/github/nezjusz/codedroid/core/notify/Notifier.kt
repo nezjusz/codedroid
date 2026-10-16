@@ -5,6 +5,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.os.Vibrator
+import android.os.VibrationEffect
+import android.os.Build
 import android.content.Intent
 import android.net.Uri
 import androidx.core.app.NotificationCompat
@@ -54,6 +57,34 @@ class Notifier(private val context: Context) {
         ).apply { description = "Host connection status" }
 
         manager.createNotificationChannels(listOf(permission, activity, status))
+    }
+
+    /** Fallback pulse length, used only below Android 10 which has no EFFECT_TICK. */
+    private val TICK_MS = 30L
+
+    /** Low on the 0-255 amplitude scale: present, not alarming. */
+    private val TICK_AMPLITUDE = 40
+
+    /**
+     * A short, quiet tick for an approval that arrived while the app was in front of the user.
+     *
+     * Deliberately weak: the permission card is already on screen and animating in, so this only
+     * has to catch the corner of the eye when they are looking at something else. A full-strength
+     * buzz for something they can already see is noise. No-ops silently when the device has no
+     * vibrator or has haptics switched off.
+     */
+    fun lightTick() {
+        val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
+        if (!vibrator.hasVibrator()) return
+
+        // EFFECT_TICK is the system's own "barely there" pattern where it exists, and on older
+        // releases a short low-amplitude pulse is its closest equivalent.
+        val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
+        } else {
+            VibrationEffect.createOneShot(TICK_MS, TICK_AMPLITUDE)
+        }
+        runCatching { vibrator.vibrate(effect) }
     }
 
     fun permissionRequest(serverId: String, serverName: String, request: PermissionRequest) {
@@ -149,6 +180,18 @@ class Notifier(private val context: Context) {
 
     private fun notify(tag: String, notification: Notification) {
         runCatching { manager.notify(notificationId(tag), notification) }
+    }
+
+    /**
+     * Removes the approval notification for one request.
+     *
+     * It is posted `ongoing`, which is deliberate - an unanswered approval should not be
+     * swipeable away - but that makes explicit cancellation the only way to take it down once
+     * the decision has been made, whether that came from the notification action or the in-app
+     * card. The tag has to match [permissionRequest]'s exactly or this silently does nothing.
+     */
+    fun cancelPermission(sessionID: String, requestID: String) {
+        runCatching { manager.cancel(notificationId("perm_${sessionID}_$requestID")) }
     }
 
     private fun sessionLabel(sessionID: String) = sessionID.takeLast(6)

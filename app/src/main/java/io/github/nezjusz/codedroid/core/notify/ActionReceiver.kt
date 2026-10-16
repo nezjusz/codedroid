@@ -23,6 +23,12 @@ class ActionReceiver : BroadcastReceiver() {
 
                 val app = context.applicationContext as? CodeDroidApp ?: return
                 val pending = goAsync()
+
+                // Take the notification down as soon as the decision is made. Waiting for the
+                // host to confirm left it on screen, and it is posted ongoing, so the user could
+                // not even swipe it away.
+                app.container.notifier.cancelPermission(sessionID, requestID)
+
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         val result = app.container.repository.replyPermission(serverId, sessionID, requestID, reply)

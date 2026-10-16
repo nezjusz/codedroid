@@ -11,6 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +32,20 @@ class MainActivity : ComponentActivity() {
         deepLink = intent.toDeepLink()
 
         val container = (application as CodeDroidApp).container
+
+        // Approvals reach the user as a notification only when the app is not in front of them;
+        // while they are looking at the session the card is already on screen.
+        lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    container.foreground.isForeground = true
+                }
+
+                override fun onStop(owner: LifecycleOwner) {
+                    container.foreground.isForeground = false
+                }
+            }
+        )
 
         setContent {
             CodeDroidTheme {
