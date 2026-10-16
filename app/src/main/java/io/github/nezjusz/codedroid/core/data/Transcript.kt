@@ -345,3 +345,48 @@ fun JsonObject.toolSummary(limit: Int = 240): String {
     }
     return toString().take(limit)
 }
+
+/**
+ * Collapses runs of tool-only assistant turns into one.
+ *
+ * An agent turn is a sequence of messages, and most of them carry nothing but a single tool call:
+ * the prose lands in one message and the tool calls in the others. Rendered one section per
+ * message that reads as a screenful of identical "Tool calls - 1 call" rows with nothing between
+ * them, which looks broken rather than busy. Adjacent entries with no prose of their own are
+ * merged so the whole run becomes a single disclosure.
+ */
+fun List<Entry>.mergeToolOnlyTurns(): List<Entry> {
+    val merged = mutableListOf<Entry>()
+    for (entry in this) {
+        val previous = merged.lastOrNull()
+        if (entry is Entry.Assistant && previous is Entry.Assistant &&
+            entry.isToolOnly() && previous.isToolOnly()
+        ) {
+            merged[merged.lastIndex] = previous.copy(
+                parts = previous.parts + entry.parts,
+                cost = previous.cost + entry.cost,
+                tokens = mergeUsage(previous.tokens, entry.tokens),
+                finish = entry.finish ?: previous.finish,
+            )
+        } else {
+            merged += entry
+        }
+    }
+    return merged
+}
+
+/** True when this turn has nothing to show but tool calls. */
+fun Entry.Assistant.isToolOnly(): Boolean =
+    parts.none { it is Part.Text || it is Part.Reasoning }
+
+private fun mergeUsage(a: TokenUsage?, b: TokenUsage?): TokenUsage? {
+    if (a == null && b == null) return null
+    val first = a ?: TokenUsage()
+    val second = b ?: TokenUsage()
+    return TokenUsage(
+        input = first.input + second.input,
+        output = first.output + second.output,
+        reasoning = first.reasoning + second.reasoning,
+        cache = second.cache ?: first.cache,
+    )
+}
