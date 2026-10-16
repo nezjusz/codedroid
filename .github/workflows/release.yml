@@ -9,10 +9,6 @@ on:
         description: 'Version to build, e.g. 1.0.1'
         required: true
         type: string
-      release_notes:
-        description: 'Release notes (optional)'
-        required: false
-        type: string
       prerelease:
         description: 'Mark as a pre-release'
         required: false
@@ -36,7 +32,6 @@ jobs:
       # the shell. `${{ }}` inside a `run:` block is script injection: a crafted version string
       # could otherwise execute arbitrary commands on the runner.
       REQUESTED_VERSION: ${{ inputs.version }}
-      REQUESTED_NOTES: ${{ inputs.release_notes }}
       PRERELEASE: ${{ inputs.prerelease }}
 
     steps:
@@ -125,22 +120,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           APK: ${{ steps.apk.outputs.path }}
-          SIGNED: ${{ steps.signing.outputs.signed }}
         run: |
+          # --generate-notes lets GitHub build the body from the commits since the last tag,
+          # which is more accurate than anything maintained by hand here.
           TAG="v$REQUESTED_VERSION"
-          NOTES_FILE="$RUNNER_TEMP/notes.md"
-
-          printf '%s\n' "${REQUESTED_NOTES:-Release $TAG}" > "$NOTES_FILE"
-          if [ "$SIGNED" != "true" ]; then
-            {
-              echo
-              echo "---"
-              echo "Signed with the **debug key** — no release keystore is configured."
-              echo "This APK is installable but cannot be published to Google Play."
-            } >> "$NOTES_FILE"
-          fi
-
-          ARGS=(--title "CodeDroid $TAG" --notes-file "$NOTES_FILE")
+          ARGS=(--title "CodeDroid $TAG" --generate-notes)
           [ "$PRERELEASE" = "true" ] && ARGS+=(--prerelease)
 
           if gh release view "$TAG" >/dev/null 2>&1; then
