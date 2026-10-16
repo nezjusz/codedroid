@@ -99,6 +99,53 @@ export ANDROID_HOME=/path/to/android-sdk
 
 Install with `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
 
+### Version
+
+`versionName` comes from a Gradle property so it can be set from the GitHub UI rather than a
+committed file, and `versionCode` is derived from it (Play requires a monotonically increasing
+integer, and hand-maintaining a second number is a reliable way to get it wrong):
+
+```sh
+./gradlew :app:assembleRelease -PversionName=1.0.1   # -> versionCode 10001
+```
+
+| `versionName` | `versionCode` |
+|---|---|
+| `1.0` | 10000 |
+| `1.2` | 10200 |
+| `1.0.1` | 10001 |
+| `2.0.0` | 20000 |
+
+A `-suffix` is preserved in the name and ignored for the code: `1.0.1-beta` → 10001.
+
+### Release signing
+
+Optional. CI passes a base64 keystore through repository secrets; without them the build falls
+back to the **debug key**, which produces an installable APK but one that cannot be published to
+Play. The fallback prints a warning and is labelled in the release notes rather than being
+silent.
+
+| Secret | Purpose |
+|---|---|
+| `CODEDROID_KEYSTORE_BASE64` | base64 of the `.jks`, decoded at build time |
+| `CODEDROID_KEYSTORE_PASSWORD` | keystore password |
+| `CODEDROID_KEY_ALIAS` | key alias |
+| `CODEDROID_KEY_PASSWORD` | key password |
+
+### GitHub Actions
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| **CI** | push to `main`, any PR, manual | runs the tests and builds a debug APK |
+| **Release** | manual only | typed version → APK named `codedroid-v<version>.apk` → GitHub release under tag `v<version>` |
+
+The 8 live-server tests skip themselves when no host is configured, so CI is hermetic.
+
+To publish a release: **Actions → Release → Run workflow**, type `1.0.1`. That produces
+`codedroid-v1.0.1.apk` and a `v1.0.1` release. The job re-reads the APK after building and fails
+if `versionName` doesn't match what was typed, so a silently-ignored `-P` flag can't ship a
+mislabeled build.
+
 ### Tests
 
 The interesting logic here is hand-written wire handling, so the suite is pinned to recorded

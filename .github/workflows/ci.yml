@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Verify tests pass
+        # The live-server suite skips itself when no host is configured, so this is hermetic.
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Verify debug APK assembles
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: codedroid-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
+          if-no-files-found: error
