@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.nezjusz.codedroid.core.data.Part
 import io.github.nezjusz.codedroid.core.data.toolSummary
@@ -179,16 +180,18 @@ private fun ReplyRow(onReply: (String) -> Unit) {
 fun ToolCallsSection(
     tools: List<Part.Tool>,
     running: Boolean,
+    sectionKey: String,
     modifier: Modifier = Modifier,
 ) {
     if (tools.isEmpty()) return
 
-    var expanded by remember(tools.size, running) { mutableStateOf(running) }
+    // Keyed on the turn, not on the tool list: while a turn streams its list is replaced on every
+    // delta, so keying on it wiped the reader's open/closed choice several times a second.
+    var expanded by remember(sectionKey) { mutableStateOf(false) }
     val status = LocalStatusColors.current
 
     val failed = tools.count { it.status == "error" }
     val stillRunning = tools.any { it.status == "running" }
-    val totalMs = tools.mapNotNull { it.endedAt?.let { end -> end - it.startedAt } }.sum()
 
     Column(
         modifier = modifier
@@ -215,9 +218,11 @@ fun ToolCallsSection(
             )
             Spacer(Modifier.width(6.dp))
             Text(
-                text = summaryLabel(tools.size, failed, totalMs),
+                text = summaryLabel(tools),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             if (failed > 0) {
@@ -244,11 +249,30 @@ fun ToolCallsSection(
     }
 }
 
-private fun summaryLabel(count: Int, failed: Int, totalMs: Long): String {
-    val calls = "$count call${if (count == 1) "" else "s"}"
+/**
+ * Header summary: how many calls, which tools, how long.
+ *
+ * Naming the tools is the part that earns its space - "2 calls" alone does not tell you whether
+ * the turn edited a file or ran a build. Repeated names collapse to one because five reads read
+ * the same as one, and the overflow is counted rather than truncated so nothing is silently lost.
+ */
+internal fun summaryLabel(tools: List<Part.Tool>): String {
+    val calls = "${tools.size} call${if (tools.size == 1) "" else "s"}"
+    val names = tools.map { it.name }.filter { it.isNotBlank() }.distinct()
+    val shown = names.take(NAMED_TOOLS_IN_SUMMARY)
+    val overflow = names.size - shown.size
+    val named = shown.joinToString(", ") + if (overflow > 0) " +$overflow" else ""
+    val totalMs = tools.mapNotNull { it.endedAt?.let { end -> end - it.startedAt } }.sum()
     val timing = if (totalMs >= 1000) " · %.1fs".format(totalMs / 1000.0) else ""
-    return "$calls$timing"
+    return buildString {
+        append(calls)
+        if (named.isNotEmpty()) append(" · ").append(named)
+        append(timing)
+    }
 }
+
+/** How many distinct tool names fit in the header before the rest is counted. */
+private const val NAMED_TOOLS_IN_SUMMARY = 3
 
 /**
  * Collapsible tool call.
