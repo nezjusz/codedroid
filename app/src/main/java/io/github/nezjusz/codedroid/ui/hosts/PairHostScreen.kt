@@ -5,6 +5,7 @@
 
 package io.github.nezjusz.codedroid.ui.hosts
 
+import java.util.UUID
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -130,18 +131,23 @@ fun PairHostScreen(
                         val client = OpenCodeClient(url, password.trim())
                         val details = client.info()
                         val normalized = OpenCodeClient.normalizeBaseUrl(url)
-                        repository.addServer(
-                            SavedServer(
-                                id = existing?.id ?: SavedServer().id,
-                                name = name.ifBlank { normalized.removePrefix("http://").removePrefix("https://") },
-                                baseUrl = normalized,
-                                token = password.trim(),
-                                directory = directory.ifBlank { existing?.directory },
-                                notifyPermissions = notifyPermissions,
-                                notifyCompletion = notifyCompletion,
-                                keepAlive = keepAlive,
-                            )
+                        val edited = SavedServer(
+                            // Keeps the existing id when editing. This used to be passed to
+                            // addServer, which appends, so editing a host stored a second entry
+                            // sharing its id. The hosts list is keyed on id, so the duplicate
+                            // threw on the next composition - and because it was persisted, on
+                            // every launch afterwards, with clearing app data as the only way out.
+                            id = existing?.id ?: UUID.randomUUID().toString(),
+                            name = name.ifBlank { normalized.removePrefix("http://").removePrefix("https://") },
+                            baseUrl = normalized,
+                            token = password.trim(),
+                            directory = directory.ifBlank { existing?.directory },
+                            notifyPermissions = notifyPermissions,
+                            notifyCompletion = notifyCompletion,
+                            keepAlive = keepAlive,
                         )
+                        if (existing == null) repository.addServer(edited)
+                        else repository.updateServer(edited)
                         info = "Connected to opencode ${details.version} (pid ${details.pid})"
                     }
                 }
