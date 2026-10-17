@@ -512,6 +512,27 @@ private val crashGuard = CoroutineExceptionHandler { _, e ->
     suspend fun models(serverId: String, directory: String?): List<ModelInfo> =
         runCatching { client(serverId).models(directory) }.getOrDefault(emptyList())
 
+    /**
+     * Switches the session's model and records it locally.
+     *
+     * Applied optimistically: the chip should move the moment it is tapped, and the host echoes
+     * the change back over SSE anyway.
+     */
+    suspend fun setSessionModel(
+        serverId: String,
+        sessionID: String,
+        model: ModelRef,
+    ): Result<Unit> = runCatching {
+        client(serverId).setModel(sessionID, model)
+        mutate(serverId) { current ->
+            current.copy(
+                sessions = current.sessions.map {
+                    if (it.id == sessionID) it.copy(model = model) else it
+                }
+            )
+        }
+    }
+
     suspend fun setServerDirectory(serverId: String, directory: String) {
         server(serverId)?.let { updateServer(it.copy(directory = directory)) }
     }

@@ -237,6 +237,8 @@ data class ModelInfo(
     val modelID: String = "",
     val providerID: String = "",
     val name: String = "",
+    /** Default variant the host reports for this model, if any. */
+    val variant: String? = null,
     val enabled: Boolean = true,
     val limit: ModelLimit? = null,
 )

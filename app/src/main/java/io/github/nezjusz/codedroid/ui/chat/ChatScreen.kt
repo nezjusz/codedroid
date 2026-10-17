@@ -43,6 +43,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -107,6 +108,8 @@ import io.github.nezjusz.codedroid.core.data.Part
 import io.github.nezjusz.codedroid.core.data.SavedServer
 import io.github.nezjusz.codedroid.core.data.ServerRuntime
 import io.github.nezjusz.codedroid.core.net.AgentInfo
+import io.github.nezjusz.codedroid.core.net.ModelInfo
+import io.github.nezjusz.codedroid.core.net.ModelRef
 import io.github.nezjusz.codedroid.core.net.PermissionRequest
 import io.github.nezjusz.codedroid.ui.components.ContainedLoadingIndicator
 import io.github.nezjusz.codedroid.ui.components.LinearWorkingBar
@@ -157,6 +160,8 @@ fun ChatScreen(
     var delivery by remember { mutableStateOf(Delivery.Steer) }
     var agent by remember { mutableStateOf<String?>(null) }
     var agents by remember { mutableStateOf<List<AgentInfo>>(emptyList()) }
+    var models by remember { mutableStateOf<List<ModelInfo>>(emptyList()) }
+    var modelSheet by remember { mutableStateOf(false) }
     var agentSheet by remember { mutableStateOf(false) }
     var approvalSheet by remember { mutableStateOf(false) }
     var approval by remember { mutableStateOf(ApprovalSetting.Unknown) }
@@ -241,6 +246,9 @@ fun ChatScreen(
 
     LaunchedEffect(sessionId, server?.directory) {
         agents = repository.agents(serverId, session?.directory ?: server?.directory)
+        // Exactly what the host offers: `models` filters on the server's own `enabled`
+        // flag, so this can never list something opencode would not let you pick.
+        models = repository.models(serverId, session?.directory ?: server?.directory)
         if (agent == null) agent = session?.agent ?: agents.firstOrNull()?.id
 
         // The agent's rules are what an inherited session runs under, so the chip cannot be
@@ -502,6 +510,8 @@ fun ChatScreen(
                     onDeliveryChange = { delivery = it },
                     agentLabel = agent ?: "build",
                     onAgentClick = { agentSheet = true },
+                    modelLabel = session?.model?.id,
+                    onModelClick = { modelSheet = true },
                     approval = approval,
                     onApprovalClick = { approvalSheet = true },
                     canAttach = attachments.size < MAX_ATTACHMENTS,
@@ -585,6 +595,21 @@ fun ChatScreen(
                 }
             }
         }
+    }
+
+    if (modelSheet) {
+        ModelPicker(
+            models = models,
+            current = session?.model,
+            onPick = { chosen ->
+                modelSheet = false
+                scope.launch {
+                    repository.setSessionModel(serverId, sessionId, chosen)
+                        .onFailure { snackbars.showSnackbar(it.message ?: "Could not change model") }
+                }
+            },
+            onDismiss = { modelSheet = false },
+        )
     }
 
     if (agentSheet) {
@@ -937,6 +962,8 @@ private fun Composer(
     onDeliveryChange: (Delivery) -> Unit,
     agentLabel: String,
     onAgentClick: () -> Unit,
+    modelLabel: String?,
+    onModelClick: () -> Unit,
     approval: ApprovalSetting,
     onApprovalClick: () -> Unit,
     canAttach: Boolean,
@@ -970,6 +997,17 @@ private fun Composer(
                     },
                     colors = AssistChipDefaults.assistChipColors(),
                 )
+
+                if (modelLabel != null) {
+                    AssistChip(
+                        onClick = onModelClick,
+                        label = { Text(modelLabel, maxLines = 1) },
+                        leadingIcon = {
+                            Icon(Icons.Filled.AutoAwesome, contentDescription = null, Modifier.size(16.dp))
+                        },
+                        colors = AssistChipDefaults.assistChipColors(),
+                    )
+                }
 
                 AssistChip(
                     onClick = { onDeliveryChange(if (delivery == Delivery.Steer) Delivery.Queue else Delivery.Steer) },
@@ -1217,4 +1255,53 @@ private fun FilterRowItem(title: String, subtitle: String?, selected: Boolean, o
         }
     }
     VerticalGap(6)
+}
+
+/**
+ * Model picker, mirroring [AgentPicker].
+ *
+ * Lists only what the host reported as enabled, which is the same set opencode's own picker
+ * offers. Each row shows the context ceiling, because it is the number that decides whether a
+ * long conversation will fit.
+ */
+@Composable
+private fun ModelPicker(
+    models: List<ModelInfo>,
+    current: ModelRef?,
+    onPick: (ModelRef) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Text("Model", style = MaterialTheme.typography.titleMedium)
+            VerticalGap(8)
+            if (models.isEmpty()) {
+                Text(
+                    "This host reported no models.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            models.forEach { option ->
+                val ref = ModelRef(
+                    id = option.id,
+                    providerID = option.providerID,
+                    variant = option.variant,
+                )
+                FilterRowItem(
+                    title = option.name.ifBlank { option.id },
+                    subtitle = buildString {
+                        append(option.id)
+                        option.limit?.context?.takeIf { it > 0 }?.let {
+                            append(" · ").append(formatTokens(it)).append(" ctx")
+                        }
+                    },
+                    selected = current?.id == option.id &&
+                        current?.providerID == option.providerID,
+                    onClick = { onPick(ref) },
+                )
+            }
+            VerticalGap(16)
+        }
+    }
 }

@@ -345,7 +345,7 @@ class OpenCodeClient(
     private fun locationParams(directory: String?): Map<String, String?> =
         if (directory.isNullOrBlank()) emptyMap() else mapOf("location[directory]" to directory)
 
-    /**
+        /**
      * Agents available on this host.
      *
      * The host answers this with 400 when the location query is attached - `/api/model` tolerates
