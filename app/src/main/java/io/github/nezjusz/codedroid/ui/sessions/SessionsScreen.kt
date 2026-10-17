@@ -267,7 +267,10 @@ private fun ConnectionSubtitle(runtime: ServerRuntime?) {
         }
         Spacer(Modifier.width(6.dp))
         Text(
-            text = runtime?.lastError?.takeIf { state == ConnectionState.Offline } ?: label,
+            // Any recorded error wins over the state label: the monitor reconnects within seconds, so
+            // requiring Offline to display it made transient failures (a rate limit, a refused
+            // connection) invisible until the app was reopened.
+            text = runtime?.lastError?.takeIf { it.isNotBlank() } ?: label,
             style = MaterialTheme.typography.labelSmall,
             color = color,
             maxLines = 1,

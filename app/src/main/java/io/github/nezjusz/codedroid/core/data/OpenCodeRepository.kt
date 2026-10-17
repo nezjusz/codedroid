@@ -15,6 +15,7 @@ import io.github.nezjusz.codedroid.core.notify.Notifier
 import io.github.nezjusz.codedroid.core.net.FileAttachment
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -72,8 +73,21 @@ class OpenCodeRepository(
     private val notifier: Notifier,
     private val isForeground: () -> Boolean = { false },
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /**
+     * Last line of defence against the process being killed from a coroutine.
+     *
+     * A `SupervisorJob` keeps one failing child from cancelling its siblings, but an unhandled
+     * exception still reaches the default handler and terminates the process. That turned a bad
+     * server state into a crash loop: the host is persisted, so every launch reconnected, failed
+     * the same way and died again, and the only way out was clearing app data. Recording instead
+     * of dying leaves the user with a visible error they can act on.
+     */
+private val crashGuard = CoroutineExceptionHandler { _, e ->
+        Log.e(TAG, "unhandled failure on the repository scope", e)
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + crashGuard)
+    private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + crashGuard)
 
     private val _servers = MutableStateFlow<List<SavedServer>>(emptyList())
     val servers: StateFlow<List<SavedServer>> = _servers.asStateFlow()

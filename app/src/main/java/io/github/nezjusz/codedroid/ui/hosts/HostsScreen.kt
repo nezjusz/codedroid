@@ -265,7 +265,11 @@ private fun HostCard(
                 }
             }
 
-            runtime?.lastError?.takeIf { state == ConnectionState.Offline }?.let { error ->
+            // Shown whenever there is one, not only while Offline. The monitor retries after two seconds,
+            // so a rate-limit or a transient refusal is recorded and then immediately back to
+            // Connecting - gating on Offline meant the message was gone before it could be read,
+            // and the only way to see it was to reopen the app.
+            runtime?.lastError?.takeIf { it.isNotBlank() }?.let { error ->
                 Text(
                     text = error,
                     style = MaterialTheme.typography.bodySmall,

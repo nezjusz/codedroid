@@ -635,13 +635,33 @@ class OpenCodeClient(
          */
         private const val SSE_IDLE_TIMEOUT_MS = 60_000L
 
-        /** Normalises user input such as `192.168.1.5:4096` into `http://192.168.1.5:4096`. */
+        /**
+         * Normalises user input into a usable base URL.
+         *
+         * A bare host gains the scheme and opencode's default port 4096 - typing `192.168.1.5`
+         * and getting a refusal on port 80, with nothing in the URL to suggest why, is a bad
+         * first run. A host the user already gave a scheme is left exactly as typed: https
+         * implies 443, so appending 4096 there would break a working configuration.
+         */
         fun normalizeBaseUrl(raw: String): String {
             var s = raw.trim().trimEnd('/')
             if (s.isEmpty()) return s
-            if (!s.startsWith("http://") && !s.startsWith("https://")) s = "http://$s"
+
+            val hadScheme = s.startsWith("http://") || s.startsWith("https://")
+            if (!hadScheme) {
+                s = "http://$s"
+                // Only when nothing follows the host: a colon there is already a port, and a
+                // slash means a path we must not staple a port onto.
+                val afterScheme = s.substringAfter("://")
+                if (!afterScheme.contains(':') && !afterScheme.contains('/')) {
+                    s = "$s:$DEFAULT_PORT"
+                }
+            }
             return s
         }
+
+        /** opencode's own listening port. */
+        private const val DEFAULT_PORT = 4096
     }
 }
 
