@@ -135,18 +135,21 @@ class Transcript {
         entries.remove(id)
         entries[id] = Entry.User(id, text, time)
     }
-    private fun applyMessage(message: MessageInfo) {
+private fun applyMessage(message: MessageInfo) {
         val time = message.time?.created ?: 0
         when (message.type) {
             "user", "synthetic" -> {
-                val text = message.text ?: message.content.filter { it.type == "text" }
-                    .joinToString("\n") { it.text.orEmpty() }
+                val text = stripInjectedBlocks(
+                    message.text ?: message.content.filter { it.type == "text" }
+                        .joinToString("\n") { it.text.orEmpty() }
+                )
                 entries[message.id] = Entry.User(message.id, text, time)
                 parts.remove(message.id)
             }
 
             "system" -> {
-                entries[message.id] = Entry.System(message.id, message.text.orEmpty(), time)
+                entries[message.id] =
+                    Entry.System(message.id, stripInjectedBlocks(message.text.orEmpty()), time)
                 parts.remove(message.id)
             }
 
@@ -390,3 +393,26 @@ private fun mergeUsage(a: TokenUsage?, b: TokenUsage?): TokenUsage? {
         cache = second.cache ?: first.cache,
     )
 }
+
+/**
+ * Removes framework-injected blocks from message text.
+ *
+ * The host splices tool catalogues, reminders and checkpoints into the message it stores, between
+ * `<system-reminder>` / `<system-update>` tags. That is plumbing for the agent, not something a
+ * person typed, and rendering it dumps pages of tool schemas into the middle of the conversation.
+ *
+ * Handles an unclosed tag as well: when an update is appended to a turn it often runs to the end
+ * of the message with no closing tag, so dropping only well-formed pairs would still leak it.
+ */
+internal fun stripInjectedBlocks(raw: String): String {
+if ('<' !in raw) return raw
+var out = raw
+for (tag in INJECTED_TAGS) {
+    // (?s) so a catalogue spanning many lines matches as one block.
+    out = out.replace(Regex("(?s)<$tag>.*?</$tag>"), "")
+    out = out.replace(Regex("(?s)<$tag>.*\\z"), "")
+}
+return out.trim()
+}
+
+private val INJECTED_TAGS = listOf("system-reminder", "system-update")
