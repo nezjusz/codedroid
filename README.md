@@ -88,4 +88,4 @@ This app intentionally permits cleartext traffic on local network hosts because 
 
 ## License
 
-[MIT](https://opensource.org/licenses/MIT)
+[License](LICENSE)
