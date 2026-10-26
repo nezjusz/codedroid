@@ -2,6 +2,10 @@
 
 Android app for remotely controlling [opencode](https://opencode.ai) sessions from your phone.
 
+| Host list | Pair host | Sessions | Chat & approvals |
+| :---: | :---: | :---: | :---: |
+| ![Host list](screenshots/hosts.jpg) | ![Pair host](screenshots/pair-host.jpg) | ![Sessions](screenshots/sessions.jpg) | ![Chat & approvals](screenshots/chat.jpg) |
+
 - Pair multiple hosts and keep separate live connections
 - Monitor session state, tokens, and cost
 - Stream assistant output, reasoning, and tool calls
