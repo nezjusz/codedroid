@@ -6,6 +6,7 @@
 package io.github.nezjusz.codedroid.ui.sessions
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -47,6 +49,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +65,8 @@ import io.github.nezjusz.codedroid.core.data.ConnectionState
 import io.github.nezjusz.codedroid.core.data.OpenCodeRepository
 import io.github.nezjusz.codedroid.core.data.SavedServer
 import io.github.nezjusz.codedroid.core.data.ServerRuntime
+import io.github.nezjusz.codedroid.core.net.ModelInfo
+import io.github.nezjusz.codedroid.core.net.ModelRef
 import io.github.nezjusz.codedroid.core.net.SessionInfo
 import io.github.nezjusz.codedroid.ui.components.EmptyState
 import io.github.nezjusz.codedroid.ui.components.LoadingIndicator
@@ -420,8 +425,19 @@ private fun NewSessionDialog(
     val projects = runtime?.projects.orEmpty()
     var title by remember { mutableStateOf("") }
     var directory by remember { mutableStateOf(runtime?.sessions?.firstOrNull()?.directory ?: projects.firstOrNull()?.canonical.orEmpty()) }
+    var models by remember { mutableStateOf<List<ModelInfo>>(emptyList()) }
+    var selectedModel by remember { mutableStateOf<ModelRef?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(serverId, directory) {
+        models = repository.models(serverId, directory.ifBlank { null })
+        if (selectedModel == null) {
+            selectedModel = models.firstOrNull()?.let {
+                ModelRef(id = it.id, providerID = it.providerID, variant = it.variant)
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -448,6 +464,36 @@ private fun NewSessionDialog(
                                             maxLines = 1,
                                         )
                                     },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (models.isNotEmpty()) {
+                    Column {
+                        Text(
+                            "Model",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        VerticalGap(4)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        ) {
+                            models.forEach { option ->
+                                val selected = selectedModel?.id == option.id
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = {
+                                        selectedModel = ModelRef(
+                                            id = option.id,
+                                            providerID = option.providerID,
+                                            variant = option.variant,
+                                        )
+                                    },
+                                    label = { Text(option.id, maxLines = 1) },
                                 )
                             }
                         }
@@ -482,7 +528,12 @@ private fun NewSessionDialog(
                     busy = true
                     error = null
                     scope.launch {
-                        repository.createSession(serverId, directory.trim(), title.trim().ifBlank { null })
+                        repository.createSession(
+                            serverId = serverId,
+                            directory = directory.trim(),
+                            title = title.trim().ifBlank { null },
+                            model = selectedModel,
+                        )
                             .onSuccess { onCreated(it.id) }
                             .onFailure {
                                 error = it.message ?: "Could not create the session"

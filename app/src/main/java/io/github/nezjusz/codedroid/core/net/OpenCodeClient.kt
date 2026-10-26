@@ -214,7 +214,18 @@ class OpenCodeClient(
             directory.takeIf { it.isNotEmpty() }?.let { put("location", buildJsonObject { put("directory", it) }) }
             title?.let { put("title", it) }
             agent?.let { put("agent", it) }
-            model?.let { put("model", buildJsonObject { put("id", it.id); put("providerID", it.providerID) }) }
+            model?.let {
+                put("providerID", it.providerID)
+                put("modelID", it.id)
+                put("id", it.id)
+                it.variant?.let { v -> put("variant", v) }
+                put("model", buildJsonObject {
+                    put("id", it.id)
+                    put("modelID", it.id)
+                    put("providerID", it.providerID)
+                    it.variant?.let { v -> put("variant", v) }
+                })
+            }
         }
         return decode<DataEnvelope<SessionInfo>>(post("/api/session", body)).data
     }
@@ -234,12 +245,21 @@ class OpenCodeClient(
         text: String,
         delivery: String? = null,
         agent: String? = null,
+        model: ModelRef? = null,
         files: List<FileAttachment> = emptyList(),
     ): String {
         val body = buildJsonObject {
             put("text", text)
             delivery?.let { put("delivery", it) }
             agent?.let { put("agents", buildJsonArrayOfAgent(it)) }
+            model?.let {
+                put("model", buildJsonObject {
+                    put("providerID", it.providerID)
+                    put("modelID", it.id)
+                    put("id", it.id)
+                    it.variant?.let { v -> put("variant", v) }
+                })
+            }
             if (files.isNotEmpty()) {
                 put(
                     "files",
@@ -326,8 +346,13 @@ class OpenCodeClient(
         post(
             "/api/session/$sessionID/model",
             buildJsonObject {
+                put("providerID", model.providerID)
+                put("modelID", model.id)
+                put("id", model.id)
+                model.variant?.let { put("variant", it) }
                 put("model", buildJsonObject {
                     put("id", model.id)
+                    put("modelID", model.id)
                     put("providerID", model.providerID)
                     model.variant?.let { put("variant", it) }
                 })

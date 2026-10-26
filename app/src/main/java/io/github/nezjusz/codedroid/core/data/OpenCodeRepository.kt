@@ -469,6 +469,7 @@ private val crashGuard = CoroutineExceptionHandler { _, e ->
         text: String,
         delivery: String?,
         agent: String?,
+        model: ModelRef? = null,
         files: List<FileAttachment> = emptyList(),
     ): Result<Unit> = runCatching {
         val client = client(serverId)
@@ -487,7 +488,7 @@ private val crashGuard = CoroutineExceptionHandler { _, e ->
             id = localId,
             time = System.currentTimeMillis(),
         )
-        client.prompt(sessionID, text, delivery = delivery, agent = agent, files = files)
+        client.prompt(sessionID, text, delivery = delivery, agent = agent, model = model, files = files)
     }
 
     suspend fun interrupt(serverId: String, sessionID: String): Boolean =
@@ -500,8 +501,14 @@ private val crashGuard = CoroutineExceptionHandler { _, e ->
             true
         }.getOrDefault(false)
 
-    suspend fun createSession(serverId: String, directory: String, title: String? = null): Result<SessionInfo> =
-        runCatching { client(serverId).createSession(directory, title) }
+    suspend fun createSession(
+        serverId: String,
+        directory: String,
+        title: String? = null,
+        agent: String? = null,
+        model: ModelRef? = null,
+    ): Result<SessionInfo> =
+        runCatching { client(serverId).createSession(directory, title, agent, model) }
 
     suspend fun deleteSession(serverId: String, sessionID: String): Result<Unit> =
         runCatching { client(serverId).deleteSession(sessionID) }
@@ -510,7 +517,13 @@ private val crashGuard = CoroutineExceptionHandler { _, e ->
         runCatching { client(serverId).agents(directory) }.getOrDefault(emptyList())
 
     suspend fun models(serverId: String, directory: String?): List<ModelInfo> =
-        runCatching { client(serverId).models(directory) }.getOrDefault(emptyList())
+        runCatching {
+            val list = client(serverId).models(directory)
+            if (list.isNotEmpty()) {
+                metadata[serverId] = metadata(serverId).copy(models = list)
+            }
+            list
+        }.getOrDefault(emptyList())
 
     /**
      * Switches the session's model and records it locally.
@@ -547,7 +560,7 @@ private val crashGuard = CoroutineExceptionHandler { _, e ->
         if (model == null) return 0
         val key = "${model.providerID}/${model.id}"
         return metadata(serverId).models
-            .firstOrNull { "${it.providerID}/${it.id}" == key }
+            .firstOrNull { ("${it.providerID}/${it.id}" == key) || (it.id == model.id) }
             ?.limit?.context
             ?.takeIf { it > 0 }
             ?: 0

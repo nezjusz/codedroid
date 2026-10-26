@@ -159,6 +159,7 @@ fun ChatScreen(
     var draft by remember { mutableStateOf("") }
     var delivery by remember { mutableStateOf(Delivery.Steer) }
     var agent by remember { mutableStateOf<String?>(null) }
+    var model by remember { mutableStateOf<ModelRef?>(null) }
     var agents by remember { mutableStateOf<List<AgentInfo>>(emptyList()) }
     var models by remember { mutableStateOf<List<ModelInfo>>(emptyList()) }
     var modelSheet by remember { mutableStateOf(false) }
@@ -233,9 +234,18 @@ fun ChatScreen(
         )
     }
 
-    // The context ceiling lives on the model list, so refresh it when the session's model changes.
-    LaunchedEffect(sessionId, session?.model?.id) {
-        handle.setContextLimit(repository.contextLimitFor(serverId, session?.model))
+    LaunchedEffect(session?.model) {
+        if (session?.model != null) {
+            model = session.model
+        }
+    }
+
+    // The context ceiling lives on the model list, so refresh it when the model changes.
+    LaunchedEffect(sessionId, (model ?: session?.model)?.id, models) {
+        val current = model ?: session?.model
+        val limit = models.firstOrNull { it.id == current?.id }?.limit?.context?.takeIf { it > 0 }
+            ?: repository.contextLimitFor(serverId, current)
+        handle.setContextLimit(limit)
     }
     val contextUsed by handle.contextUsed.collectAsStateWithLifecycle()
     val contextLimit by handle.contextLimit.collectAsStateWithLifecycle()
@@ -250,6 +260,11 @@ fun ChatScreen(
         // flag, so this can never list something opencode would not let you pick.
         models = repository.models(serverId, session?.directory ?: server?.directory)
         if (agent == null) agent = session?.agent ?: agents.firstOrNull()?.id
+        if (model == null) {
+            model = session?.model ?: models.firstOrNull()?.let {
+                ModelRef(id = it.id, providerID = it.providerID, variant = it.variant)
+            }
+        }
 
         // The agent's rules are what an inherited session runs under, so the chip cannot be
         // resolved until this has arrived.
@@ -376,6 +391,7 @@ fun ChatScreen(
                     Delivery.Queue -> "queue"
                 },
                 agent = agent,
+                model = model ?: session?.model,
                 files = files,
             ).onFailure {
                 draft = sentText
@@ -417,7 +433,8 @@ fun ChatScreen(
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f, fill = false),
                                 )
-                                session?.model?.let {
+                                val activeModel = model ?: session?.model
+                                activeModel?.let {
                                     StatusChip(
                                         label = it.id,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -452,7 +469,7 @@ fun ChatScreen(
                 )
                 // Hidden entirely when the host reports no context ceiling, rather than showing
                 // a misleading 0%.
-                if (ctxFraction > 0f) {
+                if (contextLimit > 0L) {
                     ContextBar(fraction = ctxFraction, used = contextUsed)
                 }
             }
@@ -510,7 +527,7 @@ fun ChatScreen(
                     onDeliveryChange = { delivery = it },
                     agentLabel = agent ?: "build",
                     onAgentClick = { agentSheet = true },
-                    modelLabel = session?.model?.id,
+                    modelLabel = (model ?: session?.model)?.id ?: "Model",
                     onModelClick = { modelSheet = true },
                     approval = approval,
                     onApprovalClick = { approvalSheet = true },
@@ -600,9 +617,13 @@ fun ChatScreen(
     if (modelSheet) {
         ModelPicker(
             models = models,
-            current = session?.model,
+            current = model ?: session?.model,
             onPick = { chosen ->
                 modelSheet = false
+                model = chosen
+                val limit = models.firstOrNull { it.id == chosen.id }?.limit?.context?.takeIf { it > 0 }
+                    ?: repository.contextLimitFor(serverId, chosen)
+                handle.setContextLimit(limit)
                 scope.launch {
                     repository.setSessionModel(serverId, sessionId, chosen)
                         .onFailure { snackbars.showSnackbar(it.message ?: "Could not change model") }
@@ -998,16 +1019,14 @@ private fun Composer(
                     colors = AssistChipDefaults.assistChipColors(),
                 )
 
-                if (modelLabel != null) {
-                    AssistChip(
-                        onClick = onModelClick,
-                        label = { Text(modelLabel, maxLines = 1) },
-                        leadingIcon = {
-                            Icon(Icons.Filled.AutoAwesome, contentDescription = null, Modifier.size(16.dp))
-                        },
-                        colors = AssistChipDefaults.assistChipColors(),
-                    )
-                }
+                AssistChip(
+                    onClick = onModelClick,
+                    label = { Text(modelLabel ?: "Model", maxLines = 1) },
+                    leadingIcon = {
+                        Icon(Icons.Filled.AutoAwesome, contentDescription = null, Modifier.size(16.dp))
+                    },
+                    colors = AssistChipDefaults.assistChipColors(),
+                )
 
                 AssistChip(
                     onClick = { onDeliveryChange(if (delivery == Delivery.Steer) Delivery.Queue else Delivery.Steer) },
